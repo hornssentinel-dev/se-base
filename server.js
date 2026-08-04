@@ -19,6 +19,13 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Serve the app source straight from the project root — the browser transforms
+// its JSX with Babel standalone, so this file is read fresh on every request
+// and there's no separate build/bundle step.
+app.get('/se-tracker.jsx', (req, res) => {
+  res.type('text/babel').sendFile(path.join(__dirname, 'se-tracker.jsx'));
+});
+
 // Storage API endpoints
 app.get('/api/storage/:key', (req, res) => {
   try {

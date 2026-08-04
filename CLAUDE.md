@@ -10,7 +10,7 @@ npm install    # Install dependencies
 npm start      # Runs on http://localhost:3000
 ```
 
-The server watches for changes to se-tracker.jsx and serves it via Express. No separate build step is needed — React, Tailwind, and Lucide icons load from CDN in public/index.html.
+Express serves se-tracker.jsx fresh on every request (no caching/watching layer), and public/index.html loads it as an in-browser Babel-transformed ES module. No separate build step is needed — React, Tailwind, and Lucide icons load from CDN, and an import map in public/index.html resolves the bare `react`/`lucide-react` specifiers to esm.sh builds. Edit se-tracker.jsx, then just refresh the browser.
 
 **Production deployment:**
 ```bash
@@ -111,8 +111,19 @@ The storage is a flat JSON object with keys like `"se-tracker:opps:v1"`. Values 
 ```
 
 **Note & Demo**
-- Note: `{ id, date, type, body }`
+- Note: `{ id, date, type, body, images }` — `images` is `{ id, dataUrl }[]`; `dataUrl` is a downscaled, re-encoded JPEG data URL (see `fileToImage` in se-tracker.jsx), embedded inline since there's no separate upload endpoint/blob store
 - Demo: `{ id, date, products, audience, outcome, notes }`
+
+**BizCase (Business Case tab)**
+```javascript
+{
+  id: string,
+  product: string,   // one of PRODUCTS
+  title: string,      // the business-value headline
+  detail: string       // supporting proof point / technical capability behind it
+}
+```
+Unlike notes/demos/PoC, business cases are **not** nested inside an opportunity — they're a flat list stored globally (its own storage key) and shared across every opportunity. The Business Case tab filters this shared list by product so the same library of talking points shows up consistently everywhere that product comes up, and edits/deletes apply everywhere at once.
 
 ### Important Constants
 - `SE_STAGES`: ["Discovery", "Technical validation", "PoC", "Technical win", "Handoff / closed"]
@@ -121,7 +132,9 @@ The storage is a flat JSON object with keys like `"se-tracker:opps:v1"`. Values 
 - `HEALTH`: { none, green, amber, red } — each with label, color, and Icon
 - `POC_STATUS`: { pending, pass, fail, blocked } — each with label, color, and Icon
 
-Storage key: `"se-tracker:opps:v1"`
+Storage keys:
+- `"se-tracker:opps:v1"` — the opportunities array
+- `"se-tracker:bizcases:v1"` — the shared business case library (array of BizCase)
 
 ## Common Changes
 
@@ -145,9 +158,9 @@ Storage key: `"se-tracker:opps:v1"`
 
 ## File Purposes
 
-- **server.js** – Express server; handles CORS, serves static files, manages storage API and SPA routing
-- **se-tracker.jsx** – Entire React UI; state management, rendering, event handling
-- **public/index.html** – HTML template; loads React, Tailwind, Lucide from CDN
+- **server.js** – Express server; handles CORS, serves static files, serves se-tracker.jsx itself (it lives at the project root, outside public/), manages storage API and SPA routing
+- **se-tracker.jsx** – Entire React UI; state management, rendering, event handling. This is the actual source served to the browser — it is not a template or pre-build artifact.
+- **public/index.html** – HTML shell; import map + Babel standalone + Tailwind from CDN, and the `<script>` tag that loads and transforms se-tracker.jsx. Has no app logic of its own.
 - **se-tracker.service** – Systemd service definition for production deployment
 - **data/storage.json** – Runtime data file (created automatically); do not commit to version control
 
