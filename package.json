@@ -6,10 +6,22 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "build": "echo 'Build complete - using CDN versions'"
+    "build": "echo 'Build complete - using CDN versions'",
+    "create-admin": "node scripts/create-user.js --role admin",
+    "migrate-storage": "node scripts/migrate-storage.js",
+    "backup": "node scripts/backup.js",
+    "check": "node scripts/check.js",
+    "create-user": "node scripts/create-user.js --role se",
+    "reassign": "node scripts/reassign.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "cors": "^2.8.5"
+    "better-sqlite3": "^13.0.3",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "@babel/core": "^8.0.1",
+    "@babel/preset-react": "^8.0.1"
   }
 }

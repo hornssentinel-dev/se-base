@@ -1,4 +1,9 @@
 node_modules/
 data/storage.json
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/images/
+data/backups/
 .DS_Store
 *.log

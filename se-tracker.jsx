@@ -4,14 +4,11 @@ import {
   Plus, ChevronLeft, Trash2, FlaskConical, Briefcase, AlertTriangle,
   Target, FileText, MonitorPlay, NotebookPen, Download, Upload, Pencil, Check,
   X, Circle, CircleCheck, CircleX, CircleDot, Clock, Building2, Users, Swords,
-  ArrowRight, Save, ListTodo, DollarSign, Image as ImageIcon, LayoutDashboard, Link
+  ArrowRight, Save, ListTodo, DollarSign, Image as ImageIcon, LayoutDashboard, Link,
+  LogOut, Shield, UserPlus, Copy, Mail
 } from "lucide-react";
 
 // ---- constants ---------------------------------------------------------------
-const STORE_KEY = "se-tracker:opps:v1";
-const BIZ_CASE_STORE_KEY = "se-tracker:bizcases:v1";
-const TASKS_STORE_KEY = "se-tracker:tasks:v1";
-
 const SE_STAGES = [
   "Discovery",
   "Technical validation",
@@ -139,74 +136,72 @@ function fileToImage(file, maxDim = 1600, quality = 0.82) {
   });
 }
 
-// ---- storage layer -----------------------------------------------------------
-async function loadOpps() {
-  try {
-    const res = await fetch(`/api/storage/${STORE_KEY}`);
-    const data = await res.json();
-    if (data.value) return JSON.parse(data.value);
-  } catch (e) {
-    console.error("Load failed", e);
+// ---- api layer ---------------------------------------------------------------
+// Every request carries the session cookie; a 401 anywhere means the session
+// lapsed, so the shell drops back to the sign-in screen rather than silently
+// failing to save.
+class AuthError extends Error {}
+
+async function api(url, options = {}) {
+  const res = await fetch(url, {
+    credentials: "same-origin",
+    headers: options.body ? { "Content-Type": "application/json" } : undefined,
+    ...options,
+  });
+  if (res.status === 401) throw new AuthError("Session expired");
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Request failed (${res.status})`);
   }
-  return [];
-}
-async function persist(opps) {
-  try {
-    await fetch(`/api/storage/${STORE_KEY}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value: JSON.stringify(opps) }),
-    });
-  } catch (e) {
-    console.error("Save failed", e);
-  }
+  return res.json();
 }
 
-// business case library is shared across every opportunity, not per-opp data
+async function loadOpps(all = false) {
+  return (await api(`/api/opportunities${all ? "?all=1" : ""}`)).opportunities;
+}
 async function loadBizCases() {
-  try {
-    const res = await fetch(`/api/storage/${BIZ_CASE_STORE_KEY}`);
-    const data = await res.json();
-    if (data.value) return JSON.parse(data.value);
-  } catch (e) {
-    console.error("Load failed", e);
-  }
-  return [];
+  return (await api("/api/business-cases")).businessCases;
 }
-async function persistBizCases(cases) {
-  try {
-    await fetch(`/api/storage/${BIZ_CASE_STORE_KEY}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value: JSON.stringify(cases) }),
-    });
-  } catch (e) {
-    console.error("Save failed", e);
-  }
+async function loadTasks() {
+  return (await api("/api/tasks")).tasks;
 }
 
-// task list is also shared/global — a task references the opportunity it came from
-async function loadTasks() {
-  try {
-    const res = await fetch(`/api/storage/${TASKS_STORE_KEY}`);
-    const data = await res.json();
-    if (data.value) return JSON.parse(data.value);
-  } catch (e) {
-    console.error("Load failed", e);
+// Records are written one at a time instead of reposting the whole collection.
+// syncCollection diffs the current array against the last snapshot the server
+// acknowledged and issues only the PUTs and DELETEs that actually changed, so
+// editing one opportunity no longer rewrites every other opportunity — which is
+// what let two people's concurrent edits silently overwrite each other.
+async function syncCollection(endpoint, current, snapshot) {
+  const writes = [];
+  const next = new Map();
+
+  for (const record of current) {
+    const encoded = JSON.stringify(record);
+    next.set(record.id, encoded);
+    if (snapshot.get(record.id) !== encoded) {
+      writes.push(api(`${endpoint}/${record.id}`, { method: "PUT", body: encoded }));
+    }
   }
-  return [];
-}
-async function persistTasks(tasks) {
-  try {
-    await fetch(`/api/storage/${TASKS_STORE_KEY}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ value: JSON.stringify(tasks) }),
-    });
-  } catch (e) {
-    console.error("Save failed", e);
+  for (const id of snapshot.keys()) {
+    if (!next.has(id)) writes.push(api(`${endpoint}/${id}`, { method: "DELETE" }));
   }
+
+  await Promise.all(writes);
+  return next;
 }
+
+const snapshotOf = (records) => new Map(records.map((r) => [r.id, JSON.stringify(r)]));
+
+// Images are uploaded to the blob endpoint and the note keeps only the returned
+// URL. Previously the base64 payload lived inside the note itself, so a single
+// pasted screenshot added ~70KB to every subsequent save of that opportunity.
+async function uploadImage(dataUrl) {
+  return api("/api/images", { method: "POST", body: JSON.stringify({ dataUrl }) });
+}
+
+// Notes written before the image split stored the picture inline; keep reading
+// those so old exports and un-migrated data still render.
+const imageSrc = (img) => img.url || img.dataUrl;
 
 // ---- small UI atoms ----------------------------------------------------------
 function StatTile({ Icon, label, value, sub, accent }) {
@@ -252,48 +247,65 @@ function Field({ label, children }) {
 const inputCls =
   "w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder-slate-600 focus:border-teal-500 focus:outline-none";
 
-// ---- main component ----------------------------------------------------------
-export default function SETracker() {
-  const [opps, setOpps] = useState([]);
+// Drives one collection: loads it, then on every change writes just the records
+// that actually differ from what the server last confirmed. Replaces the old
+// "repost the entire array on any edit" effect.
+function useSyncedCollection(endpoint, load, { user, onAuthLost, onError, reloadKey }) {
+  const [records, setRecords] = useState([]);
   const [loaded, setLoaded] = useState(false);
+  const snapshot = React.useRef(new Map());
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoaded(false);
+    load()
+      .then((data) => {
+        if (cancelled) return;
+        snapshot.current = snapshotOf(data);
+        setRecords(data);
+        setLoaded(true);
+      })
+      .catch((e) => (e instanceof AuthError ? onAuthLost() : onError(e.message)));
+    return () => {
+      cancelled = true;
+    };
+    // Reloads when the signed-in user changes (so switching accounts never shows
+    // the previous user's rows) or when the caller changes scope.
+  }, [user.id, reloadKey]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    syncCollection(endpoint, records, snapshot.current)
+      .then((next) => {
+        snapshot.current = next;
+      })
+      .catch((e) => (e instanceof AuthError ? onAuthLost() : onError(e.message)));
+  }, [records, loaded]);
+
+  return [records, setRecords, loaded];
+}
+
+// ---- main component ----------------------------------------------------------
+function SETracker({ user, onSignOut, onAuthLost }) {
   const [selectedId, setSelectedId] = useState(null);
   const [tab, setTab] = useState("overview");
-  const [mainView, setMainView] = useState("list"); // "list" | "dashboard"
+  const [mainView, setMainView] = useState("list"); // "list" | "dashboard" | "admin"
   const [adding, setAdding] = useState(false);
   const [filter, setFilter] = useState("all");
-  const [bizCases, setBizCases] = useState([]);
-  const [bizLoaded, setBizLoaded] = useState(false);
-  const [tasks, setTasks] = useState([]);
-  const [tasksLoaded, setTasksLoaded] = useState(false);
+  const [error, setError] = useState(null);
 
-  // load once
-  useEffect(() => {
-    loadOpps().then((data) => {
-      setOpps(data);
-      setLoaded(true);
-    });
-    loadBizCases().then((data) => {
-      setBizCases(data);
-      setBizLoaded(true);
-    });
-    loadTasks().then((data) => {
-      setTasks(data);
-      setTasksLoaded(true);
-    });
-  }, []);
+  // Admins can widen the pipeline to the whole org; the server refuses the same
+  // query for an SE, so this toggle is a convenience, not the access control.
+  const [scopeAll, setScopeAll] = useState(false);
 
-  // persist on change (after initial load)
-  useEffect(() => {
-    if (loaded) persist(opps);
-  }, [opps, loaded]);
-
-  useEffect(() => {
-    if (bizLoaded) persistBizCases(bizCases);
-  }, [bizCases, bizLoaded]);
-
-  useEffect(() => {
-    if (tasksLoaded) persistTasks(tasks);
-  }, [tasks, tasksLoaded]);
+  const syncOpts = { user, onAuthLost, onError: setError };
+  const [opps, setOpps, loaded] = useSyncedCollection(
+    "/api/opportunities",
+    () => loadOpps(scopeAll),
+    { ...syncOpts, reloadKey: scopeAll }
+  );
+  const [bizCases, setBizCases] = useSyncedCollection("/api/business-cases", loadBizCases, syncOpts);
+  const [tasks, setTasks] = useSyncedCollection("/api/tasks", loadTasks, syncOpts);
 
   const selected = opps.find((o) => o.id === selectedId) || null;
 
@@ -402,6 +414,21 @@ export default function SETracker() {
             </p>
           </div>
           <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 mr-1 pr-3 border-r border-slate-800">
+              <span className="text-xs text-slate-400">{user.name || user.email}</span>
+              {user.role === "admin" && (
+                <span className="rounded bg-teal-500/10 px-1.5 py-0.5 text-[10px] font-medium text-teal-300 border border-teal-500/30">
+                  admin
+                </span>
+              )}
+              <button
+                onClick={onSignOut}
+                title="Sign out"
+                className="text-slate-500 hover:text-rose-400"
+              >
+                <LogOut size={15} />
+              </button>
+            </div>
             <button
               onClick={exportData}
               className="inline-flex items-center gap-1.5 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-300 hover:border-slate-600"
@@ -446,6 +473,34 @@ export default function SETracker() {
               >
                 <LayoutDashboard size={14} /> Financials
               </button>
+              {user.role === "admin" && (
+                <button
+                  onClick={() => setMainView("admin")}
+                  className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium ${
+                    mainView === "admin"
+                      ? "bg-slate-800 text-slate-100"
+                      : "text-slate-500 hover:text-slate-300"
+                  }`}
+                >
+                  <Shield size={14} /> Team
+                </button>
+              )}
+              {user.role === "admin" && mainView === "list" && (
+                <button
+                  onClick={() => {
+                    setScopeAll((v) => !v);
+                    setSelectedId(null);
+                  }}
+                  title={scopeAll ? "Showing every SE's pipeline" : "Showing only your pipeline"}
+                  className={`ml-auto inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] ${
+                    scopeAll
+                      ? "border-teal-500/40 bg-teal-500/10 text-teal-300"
+                      : "border-slate-700 text-slate-500 hover:text-slate-300"
+                  }`}
+                >
+                  <Users size={13} /> {scopeAll ? "Whole team" : "Just me"}
+                </button>
+              )}
             </div>
 
             {mainView === "list" && (
@@ -456,6 +511,17 @@ export default function SETracker() {
               </div>
             )}
           </>
+        )}
+
+        {error && (
+          <div className="mt-4 flex items-center justify-between rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
+            <span className="inline-flex items-center gap-1.5">
+              <AlertTriangle size={14} /> {error}
+            </span>
+            <button onClick={() => setError(null)} className="text-rose-400 hover:text-rose-200">
+              <X size={14} />
+            </button>
+          </div>
         )}
 
         {/* body */}
@@ -473,6 +539,8 @@ export default function SETracker() {
           />
         ) : mainView === "dashboard" ? (
           <FinancialDashboard stats={stats} />
+        ) : mainView === "admin" ? (
+          <AdminPanel currentUser={user} onError={setError} onAuthLost={onAuthLost} />
         ) : (
           <ListView
             opps={filtered}
@@ -486,6 +554,7 @@ export default function SETracker() {
             tasks={tasks}
             onToggleTask={toggleTask}
             onDeleteTask={deleteTask}
+            showOwner={scopeAll}
           />
         )}
       </div>
@@ -517,7 +586,7 @@ function FinancialDashboard({ stats }) {
 }
 
 // ---- list view ---------------------------------------------------------------
-function ListView({ opps, allOpps, total, filter, setFilter, onOpen, onSeed, onAdd, tasks, onToggleTask, onDeleteTask }) {
+function ListView({ opps, allOpps, total, filter, setFilter, onOpen, onSeed, onAdd, tasks, onToggleTask, onDeleteTask, showOwner }) {
   if (total === 0) {
     return (
       <div className="mt-10 rounded-xl border border-dashed border-slate-800 bg-slate-900/50 p-10 text-center">
@@ -594,7 +663,17 @@ function ListView({ opps, allOpps, total, filter, setFilter, onOpen, onSeed, onA
               >
                 <td className="px-3 py-3">
                   <div className="font-medium text-slate-100">{o.account}</div>
-                  <div className="text-xs text-slate-500">{o.segment}</div>
+                  <div className="text-xs text-slate-500">
+                    {o.segment}
+                    {/* Only meaningful in the admin's whole-team view, where rows
+                        come from several SEs. */}
+                    {showOwner && o.ownerName && (
+                      <span className="text-slate-600">
+                        {o.segment ? " · " : ""}
+                        {o.ownerName}
+                      </span>
+                    )}
+                  </div>
                 </td>
                 <td className="px-3 py-3">
                   <span className="text-xs text-slate-300">{o.acctMgr || "—"}</span>
@@ -918,12 +997,24 @@ function NotesTab({ opp, update }) {
   const [body, setBody] = useState("");
   const [draftImages, setDraftImages] = useState([]);
   const [lightbox, setLightbox] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState(null);
 
   const addFiles = async (files) => {
     const imageFiles = [...files].filter((f) => f.type.startsWith("image/"));
     if (!imageFiles.length) return;
-    const dataUrls = await Promise.all(imageFiles.map((f) => fileToImage(f)));
-    setDraftImages((prev) => [...prev, ...dataUrls.map((dataUrl) => ({ id: uid(), dataUrl }))]);
+    setUploading(true);
+    try {
+      // Downscale in the browser as before, but hand the bytes to the blob
+      // endpoint instead of embedding them in the note.
+      const dataUrls = await Promise.all(imageFiles.map((f) => fileToImage(f)));
+      const uploaded = await Promise.all(dataUrls.map(uploadImage));
+      setDraftImages((prev) => [...prev, ...uploaded]);
+    } catch (e) {
+      setUploadError(e.message);
+    } finally {
+      setUploading(false);
+    }
   };
 
   const onFilePick = (e) => {
@@ -978,7 +1069,7 @@ function NotesTab({ opp, update }) {
           <div className="mt-2 flex flex-wrap gap-2">
             {draftImages.map((img) => (
               <div key={img.id} className="relative">
-                <img src={img.dataUrl} className="w-16 h-16 object-cover rounded border border-slate-700" />
+                <img src={imageSrc(img)} className="w-16 h-16 object-cover rounded border border-slate-700" />
                 <button
                   onClick={() => removeDraftImage(img.id)}
                   className="absolute -top-1.5 -right-1.5 rounded-full bg-slate-950 border border-slate-700 text-slate-400 hover:text-rose-400"
@@ -990,10 +1081,13 @@ function NotesTab({ opp, update }) {
           </div>
         )}
         <div className="flex justify-between items-center mt-2">
-          <label className="inline-flex items-center gap-1.5 rounded-md border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-slate-400 hover:border-slate-600 cursor-pointer">
-            <ImageIcon size={13} /> Attach image
-            <input type="file" accept="image/*" multiple onChange={onFilePick} className="hidden" />
-          </label>
+          <div className="flex items-center gap-2">
+            <label className="inline-flex items-center gap-1.5 rounded-md border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs text-slate-400 hover:border-slate-600 cursor-pointer">
+              <ImageIcon size={13} /> {uploading ? "Uploading…" : "Attach image"}
+              <input type="file" accept="image/*" multiple onChange={onFilePick} className="hidden" />
+            </label>
+            {uploadError && <span className="text-[11px] text-rose-400">{uploadError}</span>}
+          </div>
           <button onClick={add} className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-slate-950" style={{ background: "#2dd4bf" }}>
             <Plus size={14} /> Add note
           </button>
@@ -1019,8 +1113,8 @@ function NotesTab({ opp, update }) {
                 {n.images.map((img) => (
                   <img
                     key={img.id}
-                    src={img.dataUrl}
-                    onClick={() => setLightbox(img.dataUrl)}
+                    src={imageSrc(img)}
+                    onClick={() => setLightbox(imageSrc(img))}
                     className="w-20 h-20 object-cover rounded border border-slate-700 cursor-pointer hover:border-teal-600"
                   />
                 ))}
@@ -1430,5 +1524,394 @@ function Empty({ msg }) {
   return <div className="text-center text-sm text-slate-600 py-6">{msg}</div>;
 }
 
+// ---- auth screens --------------------------------------------------------------
+function AuthShell({ title, subtitle, children }) {
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-200 flex items-center justify-center px-4">
+      <div className="w-full max-w-sm">
+        <div className="flex items-center gap-2 justify-center">
+          <Target size={22} style={{ color: "#2dd4bf" }} />
+          <h1 className="text-lg font-semibold text-slate-100">SE Tracker</h1>
+        </div>
+        <p className="text-center text-xs text-slate-500 mt-1.5">{subtitle}</p>
+        <div className="mt-6 rounded-xl border border-slate-800 bg-slate-900 p-5">
+          <h2 className="text-sm font-medium text-slate-200 mb-4">{title}</h2>
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FormError({ message }) {
+  if (!message) return null;
+  return (
+    <div className="mb-3 rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
+      {message}
+    </div>
+  );
+}
+
+function LoginScreen({ onSignedIn }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const { user } = await api("/api/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ email, password }),
+      });
+      onSignedIn(user);
+    } catch (e) {
+      // A 401 here is a wrong password, not a lapsed session, so show it inline.
+      setError(e instanceof AuthError ? "Invalid email or password" : e.message);
+      setBusy(false);
+    }
+  };
+
+  return (
+    <AuthShell title="Sign in" subtitle="technical pursuit log">
+      <FormError message={error} />
+      <div className="space-y-3">
+        <Field label="Email">
+          <input
+            autoFocus
+            type="email"
+            className={inputCls}
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+          />
+        </Field>
+        <Field label="Password">
+          <input
+            type="password"
+            className={inputCls}
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+          />
+        </Field>
+      </div>
+      <button
+        onClick={submit}
+        disabled={busy}
+        className="mt-4 w-full rounded-md px-3 py-2 text-xs font-medium text-slate-950 disabled:opacity-60"
+        style={{ background: "#2dd4bf" }}
+      >
+        {busy ? "Signing in…" : "Sign in"}
+      </button>
+      <p className="mt-3 text-center text-[11px] text-slate-600">
+        Accounts are created by invite — ask an admin.
+      </p>
+    </AuthShell>
+  );
+}
+
+function InviteScreen({ token, onSignedIn }) {
+  const [invite, setInvite] = useState(null);
+  const [name, setName] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api(`/api/invite/${token}`)
+      .then((data) => {
+        setInvite(data);
+        setName(data.name || "");
+      })
+      .catch((e) => setError(e.message));
+  }, [token]);
+
+  const submit = async () => {
+    if (busy) return;
+    if (password !== confirm) return setError("Passwords do not match");
+    if (password.length < 8) return setError("Password must be at least 8 characters");
+    setBusy(true);
+    setError(null);
+    try {
+      const { user } = await api(`/api/invite/${token}/accept`, {
+        method: "POST",
+        body: JSON.stringify({ password, name }),
+      });
+      // Drop the token out of the URL so a reload doesn't retry a used invite.
+      window.history.replaceState({}, "", "/");
+      onSignedIn(user);
+    } catch (e) {
+      setError(e.message);
+      setBusy(false);
+    }
+  };
+
+  if (error && !invite) {
+    return (
+      <AuthShell title="Invite unavailable" subtitle="technical pursuit log">
+        <FormError message={error} />
+        <a href="/" className="text-xs text-teal-400 hover:text-teal-300">Go to sign in</a>
+      </AuthShell>
+    );
+  }
+  if (!invite) {
+    return <AuthShell title="Checking invite…" subtitle="technical pursuit log"><div /></AuthShell>;
+  }
+
+  return (
+    <AuthShell title="Set up your account" subtitle="technical pursuit log">
+      <FormError message={error} />
+      <p className="mb-3 text-xs text-slate-400">
+        Invited as <span className="text-slate-200">{invite.email}</span>
+        {invite.role === "admin" && <span className="text-teal-300"> (admin)</span>}
+      </p>
+      <div className="space-y-3">
+        <Field label="Display name">
+          <input autoFocus className={inputCls} value={name} onChange={(e) => setName(e.target.value)} />
+        </Field>
+        <Field label="Password (min 8 characters)">
+          <input type="password" className={inputCls} value={password} onChange={(e) => setPassword(e.target.value)} />
+        </Field>
+        <Field label="Confirm password">
+          <input
+            type="password"
+            className={inputCls}
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+          />
+        </Field>
+      </div>
+      <button
+        onClick={submit}
+        disabled={busy}
+        className="mt-4 w-full rounded-md px-3 py-2 text-xs font-medium text-slate-950 disabled:opacity-60"
+        style={{ background: "#2dd4bf" }}
+      >
+        {busy ? "Creating account…" : "Create account"}
+      </button>
+    </AuthShell>
+  );
+}
+
+// ---- admin panel ---------------------------------------------------------------
+function AdminPanel({ currentUser, onError, onAuthLost }) {
+  const [users, setUsers] = useState([]);
+  const [invites, setInvites] = useState([]);
+  const [email, setEmail] = useState("");
+  const [name, setName] = useState("");
+  const [role, setRole] = useState("se");
+  const [copied, setCopied] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const fail = (e) => (e instanceof AuthError ? onAuthLost() : onError(e.message));
+
+  const refresh = () =>
+    Promise.all([api("/api/admin/users"), api("/api/admin/invites")])
+      .then(([u, i]) => {
+        setUsers(u.users);
+        setInvites(i.invites);
+      })
+      .catch(fail);
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  const invite = async () => {
+    if (!email.trim() || busy) return;
+    setBusy(true);
+    try {
+      await api("/api/admin/invites", {
+        method: "POST",
+        body: JSON.stringify({ email: email.trim(), name: name.trim(), role }),
+      });
+      setEmail("");
+      setName("");
+      setRole("se");
+      await refresh();
+    } catch (e) {
+      fail(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // There's no mail transport, so the admin copies the link and sends it however
+  // they like. inviteUrl is absolute because that's what gets pasted.
+  const inviteUrl = (token) => `${window.location.origin}/invite/${token}`;
+  const copyInvite = (token) => {
+    navigator.clipboard.writeText(inviteUrl(token)).then(() => {
+      setCopied(token);
+      setTimeout(() => setCopied(null), 2000);
+    });
+  };
+
+  const revoke = (token) =>
+    api(`/api/admin/invites/${token}`, { method: "DELETE" }).then(refresh).catch(fail);
+
+  const patchUser = (id, body) =>
+    api(`/api/admin/users/${id}`, { method: "PATCH", body: JSON.stringify(body) })
+      .then(refresh)
+      .catch(fail);
+
+  return (
+    <div className="mt-6 space-y-5">
+      <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+        <h3 className="text-sm font-medium text-slate-200 mb-3 inline-flex items-center gap-1.5">
+          <UserPlus size={15} style={{ color: "#2dd4bf" }} /> Invite a teammate
+        </h3>
+        <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+          <input
+            className={inputCls}
+            placeholder="name@company.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && invite()}
+          />
+          <input
+            className={inputCls}
+            placeholder="Display name (optional)"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
+          <select className={inputCls} value={role} onChange={(e) => setRole(e.target.value)}>
+            <option value="se">SE</option>
+            <option value="admin">Admin</option>
+          </select>
+          <button
+            onClick={invite}
+            disabled={busy}
+            className="rounded-md px-3 py-2 text-xs font-medium text-slate-950 disabled:opacity-60"
+            style={{ background: "#2dd4bf" }}
+          >
+            Create invite
+          </button>
+        </div>
+      </div>
+
+      {invites.length > 0 && (
+        <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+          <h3 className="text-sm font-medium text-slate-200 mb-3 inline-flex items-center gap-1.5">
+            <Mail size={15} className="text-slate-400" /> Pending invites
+          </h3>
+          <div className="space-y-2">
+            {invites.map((i) => (
+              <div key={i.token} className="flex items-center justify-between gap-3 rounded-md border border-slate-800 bg-slate-950 px-3 py-2">
+                <div className="min-w-0">
+                  <div className="text-xs text-slate-200 truncate">{i.email}</div>
+                  <div className="font-mono text-[10px] text-slate-600 truncate">
+                    {i.expired ? "expired" : `expires ${i.expiresAt.slice(0, 10)}`} · {i.role}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    onClick={() => copyInvite(i.token)}
+                    className="inline-flex items-center gap-1 rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:border-slate-600"
+                  >
+                    {copied === i.token ? <Check size={12} /> : <Copy size={12} />}
+                    {copied === i.token ? "Copied" : "Copy link"}
+                  </button>
+                  <button onClick={() => revoke(i.token)} className="text-slate-600 hover:text-rose-400">
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+        <h3 className="text-sm font-medium text-slate-200 mb-3 inline-flex items-center gap-1.5">
+          <Users size={15} className="text-slate-400" /> Team ({users.length})
+        </h3>
+        <div className="space-y-2">
+          {users.map((u) => (
+            <div key={u.id} className="flex items-center justify-between gap-3 rounded-md border border-slate-800 bg-slate-950 px-3 py-2">
+              <div className="min-w-0">
+                <div className="text-xs text-slate-200 truncate">
+                  {u.name || u.email}
+                  {u.id === currentUser.id && <span className="text-slate-600"> · you</span>}
+                </div>
+                <div className="font-mono text-[10px] text-slate-600 truncate">
+                  {u.email} · {u.oppCount} opps
+                  {u.lastLoginAt ? ` · last in ${u.lastLoginAt.slice(0, 10)}` : " · never signed in"}
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <select
+                  className="rounded border border-slate-700 bg-slate-900 px-1.5 py-1 text-[11px] text-slate-300"
+                  value={u.role}
+                  onChange={(e) => patchUser(u.id, { role: e.target.value })}
+                >
+                  <option value="se">SE</option>
+                  <option value="admin">Admin</option>
+                </select>
+                <button
+                  onClick={() => patchUser(u.id, { status: u.status === "active" ? "disabled" : "active" })}
+                  className={`rounded border px-2 py-1 text-[11px] ${
+                    u.status === "active"
+                      ? "border-slate-700 text-slate-400 hover:border-rose-600 hover:text-rose-400"
+                      : "border-amber-600/50 text-amber-400"
+                  }`}
+                >
+                  {u.status === "active" ? "Disable" : "Disabled"}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+        <p className="mt-3 text-[11px] text-slate-600">
+          Admins can view the whole team's pipeline; SEs only ever see their own. Disabling
+          a user ends their sessions immediately and keeps their data intact.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ---- app shell -----------------------------------------------------------------
+// Decides between the sign-in screen, the invite-acceptance screen, and the app
+// itself. Everything below it can assume there is a signed-in user.
+function App() {
+  const [user, setUser] = useState(null);
+  const [checked, setChecked] = useState(false);
+  const inviteToken = window.location.pathname.startsWith("/invite/")
+    ? window.location.pathname.slice("/invite/".length)
+    : null;
+
+  useEffect(() => {
+    api("/api/auth/me")
+      .then(({ user }) => setUser(user))
+      .catch(() => setUser(null))
+      .finally(() => setChecked(true));
+  }, []);
+
+  const signOut = () => {
+    api("/api/auth/logout", { method: "POST" })
+      .catch(() => {})
+      .finally(() => setUser(null));
+  };
+
+  if (!checked) {
+    return <div className="min-h-screen bg-slate-950" />;
+  }
+  // An unused invite link still wins over an existing session so an admin can
+  // set up a second account from the same browser.
+  if (inviteToken && !user) {
+    return <InviteScreen token={inviteToken} onSignedIn={setUser} />;
+  }
+  if (!user) {
+    return <LoginScreen onSignedIn={setUser} />;
+  }
+  return <SETracker key={user.id} user={user} onSignOut={signOut} onAuthLost={() => setUser(null)} />;
+}
+
 // ---- mount ---------------------------------------------------------------
-createRoot(document.getElementById("root")).render(<SETracker />);
+createRoot(document.getElementById("root")).render(<App />);
