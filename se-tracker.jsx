@@ -4,7 +4,7 @@ import {
   Plus, ChevronLeft, Trash2, FlaskConical, Briefcase, AlertTriangle,
   Target, FileText, MonitorPlay, NotebookPen, Download, Upload, Pencil, Check,
   X, Circle, CircleCheck, CircleX, CircleDot, Clock, Building2, Users, Swords,
-  ArrowRight, Save, ListTodo, DollarSign, Image as ImageIcon, LayoutDashboard
+  ArrowRight, Save, ListTodo, DollarSign, Image as ImageIcon, LayoutDashboard, Link
 } from "lucide-react";
 
 // ---- constants ---------------------------------------------------------------
@@ -22,7 +22,7 @@ const SE_STAGES = [
 
 const PRODUCTS = ["SWG", "CASB", "PA", "ADVDLP", "RBI", "DSPM", "ICAP", "FwaaS"];
 
-const NOTE_TYPES = ["Discovery", "Call", "Technical", "Internal", "Risk"];
+const NOTE_TYPES = ["Discovery", "Call", "Demo", "POC", "Risk"];
 
 const POC_STATUS = {
   pending: { label: "Pending", color: "#94a3b8", Icon: Circle },
@@ -883,6 +883,28 @@ function OverviewTab({ opp, update, addTask }) {
           <div className="flex items-center gap-2">
             <Building2 size={15} className="text-slate-500" />
             <input className={inputCls} value={opp.segment || ""} onChange={(e) => set("segment", e.target.value)} />
+          </div>
+        </Field>
+
+        <Field label="Salesforce link">
+          <div className="flex items-center gap-2">
+            <Link size={15} className="text-slate-500" />
+            <input
+              className={inputCls}
+              value={opp.sfdcUrl || ""}
+              onChange={(e) => set("sfdcUrl", e.target.value)}
+              placeholder="https://yourorg.lightning.force.com/..."
+            />
+            {opp.sfdcUrl && (
+              <a
+                href={opp.sfdcUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs text-blue-600 hover:underline whitespace-nowrap"
+              >
+                Open
+              </a>
+            )}
           </div>
         </Field>
       </div>
