@@ -60,6 +60,23 @@ db.exec(`
     expires_at TEXT NOT NULL
   );
 
+  -- Machine credentials for read-only integrations (the Ollama ingest client,
+  -- say). A script can't carry a session cookie, and we don't want to hand a
+  -- background job a human's password, so these are separate long-lived bearer
+  -- tokens. Only the sha256 of the token is stored: a leaked database row can't
+  -- be replayed as a credential.
+  CREATE TABLE IF NOT EXISTS api_keys (
+    id           TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name         TEXT NOT NULL DEFAULT '',
+    token_hash   TEXT NOT NULL UNIQUE,
+    scope        TEXT NOT NULL DEFAULT 'read' CHECK (scope IN ('read')),
+    created_at   TEXT NOT NULL,
+    expires_at   TEXT,
+    revoked_at   TEXT,
+    last_used_at TEXT
+  );
+
   CREATE TABLE IF NOT EXISTS opportunities (
     id           TEXT PRIMARY KEY,
     user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -107,6 +124,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_tasks_user    ON tasks(user_id);
   CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
   CREATE INDEX IF NOT EXISTS idx_invites_email ON invites(email);
+  CREATE INDEX IF NOT EXISTS idx_api_keys_user  ON api_keys(user_id);
 `);
 
 const parse = (raw, fallback) => {

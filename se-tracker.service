@@ -5,9 +5,12 @@ After=network.target
 [Service]
 Type=simple
 User=rphalen
-WorkingDirectory=/home/rphalen/se_base
-ExecStart=/usr/bin/node /home/rphalen/se_base/server.js
-Restart=on-failure
+WorkingDirectory=/home/rphalen/se_tracker
+# Must be the nvm node, not /usr/bin/node (v20): better-sqlite3 v13's prebuilt
+# binary segfaults on the first db open under v20, with no output at all — the
+# unit just restart-loops silently. npm install ran under this interpreter.
+ExecStart=/home/rphalen/.nvm/versions/node/v22.20.0/bin/node /home/rphalen/se_tracker/server.js
+Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
@@ -15,6 +18,11 @@ StandardError=journal
 # Environment variables
 Environment="NODE_ENV=production"
 Environment="PORT=3000"
+# Ollama runs on the GPU box, not here. Left unset, server.js falls back to
+# http://localhost:11434 — this host's CPU-only Ollama, which is what made the
+# first token take a minute or two.
+Environment="OLLAMA_URL=http://192.168.4.124:11434"
+Environment="OLLAMA_MODEL=llama3.2:3b"
 
 [Install]
 WantedBy=multi-user.target

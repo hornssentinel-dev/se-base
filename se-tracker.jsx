@@ -1,12 +1,16 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Plus, ChevronLeft, Trash2, FlaskConical, Briefcase, AlertTriangle,
   Target, FileText, MonitorPlay, NotebookPen, Download, Upload, Pencil, Check,
   X, Circle, CircleCheck, CircleX, CircleDot, Clock, Building2, Users, Swords,
   ArrowRight, Save, ListTodo, DollarSign, Image as ImageIcon, LayoutDashboard, Link,
-  LogOut, Shield, UserPlus, Copy, Mail
+  LogOut, Shield, UserPlus, Copy, Mail, MessageSquare, Send, Sparkles,
+  Menu, TrendingUp, Layers
 } from "lucide-react";
+// PoC health lives in a plain-JS module so the server can import the same
+// function; see health.js. Absolute path: it is served from the project root.
+import { derivePocHealth, isPocAtRisk } from "/health.js";
 
 // ---- constants ---------------------------------------------------------------
 const SE_STAGES = [
@@ -45,18 +49,6 @@ const formatAcv = (n) =>
 const isClosed = (opp) => opp.closeStatus === "won" || opp.closeStatus === "lost";
 
 // derive PoC health from criteria + dates
-function derivePocHealth(opp) {
-  const poc = opp.poc;
-  if (!poc || !poc.active || !poc.criteria?.length) return "none";
-  const statuses = poc.criteria.map((c) => c.status);
-  if (statuses.includes("fail") || statuses.includes("blocked")) return "red";
-  const allPass = statuses.every((s) => s === "pass");
-  if (allPass) return "green";
-  const overdue = poc.targetDate && poc.targetDate < today();
-  if (overdue) return "amber";
-  return "green";
-}
-
 const sampleOpp = () => ({
   id: uid(),
   account: "Nexum Financial",
@@ -204,16 +196,30 @@ async function uploadImage(dataUrl) {
 const imageSrc = (img) => img.url || img.dataUrl;
 
 // ---- small UI atoms ----------------------------------------------------------
-function StatTile({ Icon, label, value, sub, accent }) {
+function StatTile({ Icon, label, value, sub, accent, onClick, active }) {
+  // A tile that filters is a button, not a div with a handler: it has to be
+  // reachable by keyboard and announce itself as pressed.
+  const El = onClick ? "button" : "div";
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
-      <div className="flex items-center gap-2 text-slate-400 text-xs uppercase tracking-wider">
-        <Icon size={14} style={{ color: accent }} />
-        {label}
+    <El
+      type={onClick ? "button" : undefined}
+      onClick={onClick}
+      aria-pressed={onClick ? !!active : undefined}
+      className={`card p-4 text-left shadow-card transition-colors ${
+        onClick ? "w-full cursor-pointer hover:border-slate-700" : ""
+      } ${active ? "!border-teal-500/60 ring-1 ring-teal-500/20" : ""}`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-[11px] font-medium uppercase tracking-wider text-slate-500">{label}</div>
+          <div className="mt-2 text-3xl font-semibold leading-none text-slate-100 tabular-nums">{value}</div>
+          {sub && <div className="mt-2 truncate text-xs text-slate-500">{sub}</div>}
+        </div>
+        <span className="shrink-0 rounded-lg p-2.5" style={{ background: `${accent}1f`, color: accent }}>
+          <Icon size={18} />
+        </span>
       </div>
-      <div className="mt-2 text-2xl font-semibold text-slate-100 tabular-nums">{value}</div>
-      {sub && <div className="mt-0.5 text-xs text-slate-500">{sub}</div>}
-    </div>
+    </El>
   );
 }
 
@@ -290,6 +296,8 @@ function SETracker({ user, onSignOut, onAuthLost }) {
   const [selectedId, setSelectedId] = useState(null);
   const [tab, setTab] = useState("overview");
   const [mainView, setMainView] = useState("list"); // "list" | "dashboard" | "admin"
+  const [chatOpen, setChatOpen] = useState(false);
+  const [navOpen, setNavOpen] = useState(false); // drawer, below the lg breakpoint only
   const [adding, setAdding] = useState(false);
   const [filter, setFilter] = useState("all");
   const [error, setError] = useState(null);
@@ -337,12 +345,13 @@ function SETracker({ user, onSignOut, onAuthLost }) {
   const toggleTask = (id) =>
     setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, done: !t.done } : t)));
   const deleteTask = (id) => setTasks((prev) => prev.filter((t) => t.id !== id));
+  const openTaskCount = tasks.filter((t) => !t.done).length;
 
   // summary stats
   const stats = useMemo(() => {
     const open = opps.filter((o) => !isClosed(o));
     const livePocs = open.filter((o) => o.poc?.active);
-    const atRisk = livePocs.filter((o) => ["amber", "red"].includes(derivePocHealth(o)));
+    const atRisk = livePocs.filter((o) => isPocAtRisk(o));
     // closed-won and closed-lost ACV drops out — Total ACV reflects open pipeline only
     const totalAcv = open.reduce((sum, o) => sum + (Number(o.acv) || 0), 0);
     return {
@@ -357,7 +366,7 @@ function SETracker({ user, onSignOut, onAuthLost }) {
     if (filter === "all") return opps.filter((o) => !isClosed(o));
     if (filter === "poc") return opps.filter((o) => !isClosed(o) && o.poc?.active);
     if (filter === "risk")
-      return opps.filter((o) => !isClosed(o) && ["amber", "red"].includes(derivePocHealth(o)));
+      return opps.filter((o) => !isClosed(o) && isPocAtRisk(o));
     if (filter === "closed") return opps.filter(isClosed);
     return opps;
   }, [opps, filter]);
@@ -390,7 +399,7 @@ function SETracker({ user, onSignOut, onAuthLost }) {
 
   if (!loaded) {
     return (
-      <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-500">
+      <div className="flex min-h-screen items-center justify-center bg-slate-950 text-slate-500">
         <div className="flex items-center gap-2 text-sm">
           <Clock size={16} className="animate-spin" /> Loading your tracker…
         </div>
@@ -398,166 +407,258 @@ function SETracker({ user, onSignOut, onAuthLost }) {
     );
   }
 
+  // Sidebar is permanent from lg up and a drawer below it, so the app fills a
+  // wide screen without stranding phone users on a 240px-narrower viewport.
+  const navMain = [
+    { key: "list", label: "Pipeline", Icon: Briefcase },
+    { key: "dashboard", label: "Financials", Icon: LayoutDashboard },
+    ...(user.role === "admin" ? [{ key: "admin", label: "Team", Icon: Shield }] : []),
+  ];
+
+  const goto = (key) => {
+    setMainView(key);
+    setSelectedId(null);
+    setNavOpen(false);
+  };
+
+  const page = selected
+    ? { title: selected.account, sub: selected.segment || "Opportunity detail" }
+    : mainView === "dashboard"
+    ? { title: "Financials", sub: "Open pipeline value, stage mix and product coverage" }
+    : mainView === "admin"
+    ? { title: "Team", sub: "Accounts, roles and invitations" }
+    : {
+        title: "Pipeline",
+        sub: "Notes, demos and PoC validation — built for the SE seat, not the rep forecast.",
+      };
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-200" style={{ fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
-      <div className="max-w-6xl mx-auto px-4 py-6">
-        {/* header */}
-        <div className="flex items-center justify-between flex-wrap gap-3 border-b border-slate-800 pb-4">
-          <div>
-            <div className="flex items-center gap-2">
-              <Target size={20} style={{ color: "#2dd4bf" }} />
-              <h1 className="text-lg font-semibold text-slate-100">SE Tracker</h1>
-              <span className="font-mono text-[11px] text-slate-600">technical pursuit log</span>
-            </div>
-            <p className="text-xs text-slate-500 mt-1">
-              Notes, demos and PoC validation — built for the SE seat, not the rep forecast.
+    <div className="min-h-screen bg-slate-950 text-slate-200">
+      <aside
+        className={`fixed inset-y-0 left-0 z-50 flex w-60 flex-col border-r border-slate-800 bg-slate-900 transition-transform duration-200 lg:translate-x-0 ${
+          navOpen ? "translate-x-0" : "-translate-x-full"
+        }`}
+      >
+        <div className="flex h-16 shrink-0 items-center gap-2 border-b border-slate-800 px-5">
+          <Target size={20} style={{ color: "#2dd4bf" }} />
+          <span className="text-[15px] font-semibold text-slate-100">SE Tracker</span>
+          <button
+            onClick={() => setNavOpen(false)}
+            className="ml-auto text-slate-500 hover:text-slate-300 lg:hidden"
+            title="Close menu"
+          >
+            <X size={16} />
+          </button>
+        </div>
+
+        <div className="border-b border-slate-800 p-4">
+          <div className="rounded-lg bg-slate-850 p-3">
+            <p className="text-[10px] font-medium uppercase tracking-wider text-slate-500">Signed in</p>
+            <p className="mt-1 truncate text-sm font-medium text-slate-200">{user.name || user.email}</p>
+            <p className="mt-0.5 text-xs text-slate-500">
+              {user.role === "admin" ? "Administrator" : "Sales engineer"}
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            <div className="flex items-center gap-2 mr-1 pr-3 border-r border-slate-800">
-              <span className="text-xs text-slate-400">{user.name || user.email}</span>
-              {user.role === "admin" && (
-                <span className="rounded bg-teal-500/10 px-1.5 py-0.5 text-[10px] font-medium text-teal-300 border border-teal-500/30">
-                  admin
-                </span>
-              )}
-              <button
-                onClick={onSignOut}
-                title="Sign out"
-                className="text-slate-500 hover:text-rose-400"
-              >
-                <LogOut size={15} />
-              </button>
-            </div>
+        </div>
+
+        <nav className="flex-1 overflow-y-auto px-3 pb-4">
+          <p className="nav-section">Workspace</p>
+          {navMain.map((n) => (
             <button
-              onClick={exportData}
-              className="inline-flex items-center gap-1.5 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-300 hover:border-slate-600"
+              key={n.key}
+              onClick={() => goto(n.key)}
+              className={`nav-link ${!selected && mainView === n.key ? "active" : ""}`}
             >
-              <Download size={14} /> Export
+              <n.Icon size={16} /> {n.label}
             </button>
-            <label className="inline-flex items-center gap-1.5 rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-xs text-slate-300 hover:border-slate-600 cursor-pointer">
-              <Upload size={14} /> Import
-              <input type="file" accept="application/json" onChange={importData} className="hidden" />
-            </label>
+          ))}
+
+          <p className="nav-section">Tasks</p>
+          <button
+            onClick={() => {
+              goto("list");
+              setFilter("tasks");
+            }}
+            className={`nav-link ${!selected && mainView === "list" && filter === "tasks" ? "active" : ""}`}
+          >
+            <ListTodo size={16} /> Open tasks
+            {openTaskCount > 0 && (
+              <span className="ml-auto rounded-full bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-slate-300">
+                {openTaskCount}
+              </span>
+            )}
+          </button>
+
+          <p className="nav-section">Data</p>
+          <button onClick={exportData} className="nav-link">
+            <Download size={16} /> Export JSON
+          </button>
+          <label className="nav-link cursor-pointer">
+            <Upload size={16} /> Import JSON
+            <input type="file" accept="application/json" onChange={importData} className="hidden" />
+          </label>
+        </nav>
+
+        <div className="border-t border-slate-800 p-3">
+          <button onClick={onSignOut} className="nav-link hover:bg-rose-500/10 hover:text-rose-400">
+            <LogOut size={16} /> Sign out
+          </button>
+        </div>
+      </aside>
+
+      {navOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-slate-950/70 lg:hidden"
+          onClick={() => setNavOpen(false)}
+        />
+      )}
+
+      <div className="lg:pl-60">
+        <header className="sticky top-0 z-30 flex h-16 items-center gap-3 border-b border-slate-800 bg-slate-900/95 px-4 backdrop-blur sm:px-6">
+          <button
+            onClick={() => setNavOpen(true)}
+            className="-ml-1 rounded-md p-2 text-slate-400 hover:bg-slate-850 hover:text-slate-200 lg:hidden"
+            title="Menu"
+          >
+            <Menu size={18} />
+          </button>
+          <div className="min-w-0 flex-1">
+            <h1 className="truncate text-base font-semibold text-slate-100">{page.title}</h1>
+            <p className="hidden truncate text-xs text-slate-500 sm:block">{page.sub}</p>
+          </div>
+          <div className="flex items-center gap-2">
+            {user.role === "admin" && !selected && mainView === "list" && (
+              <button
+                onClick={() => {
+                  setScopeAll((v) => !v);
+                  setSelectedId(null);
+                }}
+                title={scopeAll ? "Showing every SE's pipeline" : "Showing only your pipeline"}
+                className={`hidden items-center gap-1.5 rounded-md border px-2.5 py-2 text-xs sm:inline-flex ${
+                  scopeAll
+                    ? "border-teal-500/40 bg-teal-500/10 text-teal-300"
+                    : "border-slate-700 bg-slate-900 text-slate-400 hover:border-slate-600 hover:text-slate-200"
+                }`}
+              >
+                <Users size={14} /> {scopeAll ? "Whole team" : "Just me"}
+              </button>
+            )}
+            <button
+              onClick={() => setChatOpen((v) => !v)}
+              title="Ask questions about your pipeline"
+              className={`inline-flex items-center gap-1.5 rounded-md border px-3 py-2 text-xs ${
+                chatOpen
+                  ? "border-teal-500/40 bg-teal-500/10 text-teal-300"
+                  : "border-slate-700 bg-slate-900 text-slate-300 hover:border-slate-600"
+              }`}
+            >
+              <MessageSquare size={14} /> <span className="hidden sm:inline">Ask</span>
+            </button>
             <button
               onClick={() => setAdding(true)}
               className="inline-flex items-center gap-1.5 rounded-md px-3 py-2 text-xs font-medium text-slate-950"
               style={{ background: "#2dd4bf" }}
             >
-              <Plus size={14} /> New opportunity
+              <Plus size={14} /> <span className="hidden sm:inline">New opportunity</span>
             </button>
           </div>
-        </div>
+        </header>
 
-        {/* nav + stats — hidden while working inside an opportunity */}
-        {!selected && (
-          <>
-            <div className="flex items-center gap-1.5 mt-5">
-              <button
-                onClick={() => setMainView("list")}
-                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium ${
-                  mainView === "list"
-                    ? "bg-slate-800 text-slate-100"
-                    : "text-slate-500 hover:text-slate-300"
-                }`}
-              >
-                <Briefcase size={14} /> Pipeline
+        <main className="mx-auto w-full max-w-[1600px] px-4 py-6 sm:px-6">
+          {error && (
+            <div className="mb-5 flex items-center justify-between rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
+              <span className="inline-flex items-center gap-1.5">
+                <AlertTriangle size={14} /> {error}
+              </span>
+              <button onClick={() => setError(null)} className="text-rose-400 hover:text-rose-200">
+                <X size={14} />
               </button>
-              <button
-                onClick={() => setMainView("dashboard")}
-                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium ${
-                  mainView === "dashboard"
-                    ? "bg-slate-800 text-slate-100"
-                    : "text-slate-500 hover:text-slate-300"
-                }`}
-              >
-                <LayoutDashboard size={14} /> Financials
-              </button>
-              {user.role === "admin" && (
-                <button
-                  onClick={() => setMainView("admin")}
-                  className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium ${
-                    mainView === "admin"
-                      ? "bg-slate-800 text-slate-100"
-                      : "text-slate-500 hover:text-slate-300"
-                  }`}
-                >
-                  <Shield size={14} /> Team
-                </button>
-              )}
-              {user.role === "admin" && mainView === "list" && (
-                <button
-                  onClick={() => {
-                    setScopeAll((v) => !v);
-                    setSelectedId(null);
-                  }}
-                  title={scopeAll ? "Showing every SE's pipeline" : "Showing only your pipeline"}
-                  className={`ml-auto inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] ${
-                    scopeAll
-                      ? "border-teal-500/40 bg-teal-500/10 text-teal-300"
-                      : "border-slate-700 text-slate-500 hover:text-slate-300"
-                  }`}
-                >
-                  <Users size={13} /> {scopeAll ? "Whole team" : "Just me"}
-                </button>
-              )}
             </div>
+          )}
 
-            {mainView === "list" && (
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-3">
-                <StatTile Icon={Briefcase} label="Active opps" value={stats.active} accent="#2dd4bf" />
-                <StatTile Icon={FlaskConical} label="Live PoCs" value={stats.poc} accent="#38bdf8" />
-                <StatTile Icon={AlertTriangle} label="PoCs at risk" value={stats.risk} accent="#fbbf24" sub={stats.risk ? "needs your attention" : "all clear"} />
-              </div>
-            )}
-          </>
-        )}
+          {/* The stat row doubles as the pipeline filter, so the number you
+              react to is the thing you click. Hidden inside an opportunity. */}
+          {!selected && mainView === "list" && (
+            <div className="mb-5 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <StatTile
+                Icon={Briefcase}
+                label="Active opps"
+                value={stats.active}
+                accent="#2dd4bf"
+                sub={filter === "all" ? "Showing all open" : "Show all open"}
+                active={filter === "all"}
+                onClick={() => setFilter("all")}
+              />
+              <StatTile
+                Icon={FlaskConical}
+                label="Live PoCs"
+                value={stats.poc}
+                accent="#38bdf8"
+                sub={filter === "poc" ? "Filtering by this" : "Click to filter"}
+                active={filter === "poc"}
+                onClick={() => setFilter("poc")}
+              />
+              <StatTile
+                Icon={AlertTriangle}
+                label="PoCs at risk"
+                value={stats.risk}
+                accent="#fbbf24"
+                sub={stats.risk ? "Needs your attention" : "All clear"}
+                active={filter === "risk"}
+                onClick={() => setFilter("risk")}
+              />
+              <StatTile
+                Icon={DollarSign}
+                label="Open ACV"
+                value={formatAcv(stats.totalAcv)}
+                accent="#34d399"
+                sub="Open pipeline only"
+              />
+            </div>
+          )}
 
-        {error && (
-          <div className="mt-4 flex items-center justify-between rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
-            <span className="inline-flex items-center gap-1.5">
-              <AlertTriangle size={14} /> {error}
-            </span>
-            <button onClick={() => setError(null)} className="text-rose-400 hover:text-rose-200">
-              <X size={14} />
-            </button>
-          </div>
-        )}
-
-        {/* body */}
-        {selected ? (
-          <DetailView
-            opp={selected}
-            tab={tab}
-            setTab={setTab}
-            update={update}
-            removeOpp={removeOpp}
-            onBack={() => setSelectedId(null)}
-            bizCases={bizCases}
-            setBizCases={setBizCases}
-            addTask={addTask}
-          />
-        ) : mainView === "dashboard" ? (
-          <FinancialDashboard stats={stats} />
-        ) : mainView === "admin" ? (
-          <AdminPanel currentUser={user} onError={setError} onAuthLost={onAuthLost} />
-        ) : (
-          <ListView
-            opps={filtered}
-            allOpps={opps}
-            total={opps.length}
-            filter={filter}
-            setFilter={setFilter}
-            onOpen={openOpp}
-            onSeed={() => setOpps([sampleOpp()])}
-            onAdd={() => setAdding(true)}
-            tasks={tasks}
-            onToggleTask={toggleTask}
-            onDeleteTask={deleteTask}
-            showOwner={scopeAll}
-          />
-        )}
+          {selected ? (
+            <DetailView
+              opp={selected}
+              tab={tab}
+              setTab={setTab}
+              update={update}
+              removeOpp={removeOpp}
+              onBack={() => setSelectedId(null)}
+              bizCases={bizCases}
+              setBizCases={setBizCases}
+              addTask={addTask}
+            />
+          ) : mainView === "dashboard" ? (
+            <FinancialDashboard stats={stats} opps={opps} />
+          ) : mainView === "admin" ? (
+            <AdminPanel currentUser={user} onError={setError} onAuthLost={onAuthLost} />
+          ) : (
+            <ListView
+              opps={filtered}
+              allOpps={opps}
+              total={opps.length}
+              filter={filter}
+              setFilter={setFilter}
+              onOpen={openOpp}
+              onSeed={() => setOpps([sampleOpp()])}
+              onAdd={() => setAdding(true)}
+              tasks={tasks}
+              onToggleTask={toggleTask}
+              onDeleteTask={deleteTask}
+              showOwner={scopeAll}
+            />
+          )}
+        </main>
       </div>
+
+      {chatOpen && (
+        <ChatPanel
+          onClose={() => setChatOpen(false)}
+          scopeAll={scopeAll}
+          onAuthLost={onAuthLost}
+        />
+      )}
 
       {adding && (
         <AddModal
@@ -574,13 +675,345 @@ function SETracker({ user, onSignOut, onAuthLost }) {
   );
 }
 
-// ---- financial dashboard -------------------------------------------------------
-function FinancialDashboard({ stats }) {
+// ---- ask: Ollama-backed chat over the tracker --------------------------------
+// The panel never talks to Ollama directly. It posts to /api/chat, which builds
+// the prompt from rows the signed-in user is allowed to see and proxies to the
+// model — so the browser can't widen its own scope by editing a context blob.
+const SUGGESTIONS = [
+  "Which deals are at risk, and why?",
+  "What's blocking my PoCs right now?",
+  "Summarise my pipeline by SE stage.",
+  "What have I learned about competitors?",
+];
+
+function ChatPanel({ onClose, scopeAll, onAuthLost }) {
+  const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [meta, setMeta] = useState(null);
+  const [elapsed, setElapsed] = useState(0);
+  const endRef = useRef(null);
+  const inputRef = useRef(null);
+
+  useEffect(() => { inputRef.current?.focus(); }, []);
+
+  // The clock stays even though the GPU host answers sub-second: a request that
+  // does stall (Ollama down, model cold) is otherwise indistinguishable from a
+  // hung panel.
+  useEffect(() => {
+    if (!busy) return;
+    setElapsed(0);
+    const started = Date.now();
+    const id = setInterval(() => setElapsed(Math.round((Date.now() - started) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [busy]);
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, busy]);
+
+  async function send(question) {
+    const q = (question ?? input).trim();
+    if (!q || busy) return;
+
+    const next = [...messages, { role: "user", content: q }];
+    setMessages(next);
+    setInput("");
+    setBusy(true);
+    setError(null);
+
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: next, all: scopeAll }),
+      });
+      if (res.status === 401) return onAuthLost();
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `Request failed (${res.status})`);
+      }
+
+      // The reply arrives as NDJSON, one token-ish chunk per line. Append as it
+      // lands so a slow local model shows progress instead of a frozen panel.
+      setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop();           // keep the partial line for the next read
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let parsed;
+          try { parsed = JSON.parse(line); } catch { continue; }
+          if (parsed.meta) { setMeta(parsed.meta); continue; }
+          const token = parsed.message?.content;
+          if (!token) continue;
+          setMessages((prev) => {
+            const copy = [...prev];
+            const last = copy[copy.length - 1];
+            copy[copy.length - 1] = { ...last, content: last.content + token };
+            return copy;
+          });
+        }
+      }
+    } catch (err) {
+      setError(err.message);
+      // Drop the empty assistant bubble the stream never filled.
+      setMessages((prev) => prev.filter((m) => !(m.role === "assistant" && !m.content)));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <div className="mt-6">
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-        <StatTile Icon={DollarSign} label="Total ACV" value={formatAcv(stats.totalAcv)} accent="#34d399" sub="open pipeline" />
+    <div className="fixed inset-y-0 right-0 z-40 flex w-full max-w-md flex-col border-l border-slate-800 bg-slate-950 shadow-2xl">
+      <div className="flex items-center justify-between border-b border-slate-800 px-4 py-3">
+        <div className="flex items-center gap-2">
+          <Sparkles size={16} style={{ color: "#2dd4bf" }} />
+          <span className="text-sm font-medium text-slate-100">Ask the tracker</span>
+          {scopeAll && (
+            <span className="rounded bg-teal-500/10 px-1.5 py-0.5 text-[10px] text-teal-300 border border-teal-500/30">
+              org-wide
+            </span>
+          )}
+        </div>
+        <button onClick={onClose} className="text-slate-500 hover:text-slate-300" title="Close">
+          <X size={16} />
+        </button>
       </div>
+
+      <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+        {messages.length === 0 && (
+          <div className="text-sm text-slate-500">
+            <p>
+              Ask about your accounts, notes, demos and PoCs. Answers come from your
+              tracker records only — nothing is invented.
+            </p>
+            <div className="mt-4 space-y-2">
+              {SUGGESTIONS.map((sug) => (
+                <button
+                  key={sug}
+                  onClick={() => send(sug)}
+                  className="block w-full rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-left text-xs text-slate-300 hover:border-slate-700"
+                >
+                  {sug}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {messages.map((m, i) => (
+          <div key={i} className={m.role === "user" ? "text-right" : ""}>
+            <div
+              className={`inline-block max-w-[92%] whitespace-pre-wrap rounded-lg px-3 py-2 text-sm text-left ${
+                m.role === "user"
+                  ? "bg-slate-800 text-slate-100"
+                  : "border border-slate-800 bg-slate-900 text-slate-300"
+              }`}
+            >
+              {m.content || (
+                <span className="text-slate-600">
+                  thinking… {elapsed}s
+                </span>
+              )}
+            </div>
+          </div>
+        ))}
+
+        {error && (
+          <div className="rounded-md border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
+            {error}
+          </div>
+        )}
+        <div ref={endRef} />
+      </div>
+
+      <div className="border-t border-slate-800 px-4 py-3">
+        {meta && (
+          <p className="mb-2 text-[11px] text-slate-600">
+            {meta.model} · {meta.opportunities} opportunit{meta.opportunities === 1 ? "y" : "ies"}
+            {" + "}{meta.documents} note{meta.documents === 1 ? "" : "s"}
+            {meta.truncated ? " (notes sampled)" : ""}
+          </p>
+        )}
+        <div className="flex items-end gap-2">
+          <textarea
+            ref={inputRef}
+            rows={2}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+            }}
+            placeholder="Ask a question…  (Enter to send, Shift+Enter for a new line)"
+            className="flex-1 resize-none rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus:border-slate-700 focus:outline-none"
+          />
+          <button
+            onClick={() => send()}
+            disabled={busy || !input.trim()}
+            className="rounded-md px-3 py-2 text-slate-950 disabled:opacity-40"
+            style={{ background: "#2dd4bf" }}
+            title="Send"
+          >
+            <Send size={15} />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---- financial dashboard -------------------------------------------------------
+// A bar whose width is relative to the largest row, so the shape of the
+// pipeline is readable at a glance without a charting library.
+function MeterRow({ label, value, max, count, color }) {
+  const pct = value > 0 && max > 0 ? Math.max(2, Math.round((value / max) * 100)) : 0;
+  return (
+    <div>
+      <div className="flex items-baseline justify-between gap-3 text-xs">
+        <span className="truncate text-slate-300">{label}</span>
+        <span className="shrink-0 tabular-nums text-slate-400">
+          {formatAcv(value)}
+          <span className="ml-2 text-slate-600">{count}</span>
+        </span>
+      </div>
+      <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-slate-850">
+        <div className="h-full rounded-full" style={{ width: `${pct}%`, background: color }} />
+      </div>
+    </div>
+  );
+}
+
+function FinancialDashboard({ stats, opps }) {
+  const f = useMemo(() => {
+    const sum = (arr) => arr.reduce((s, o) => s + (Number(o.acv) || 0), 0);
+    const open = opps.filter((o) => !isClosed(o));
+    const won = opps.filter((o) => o.closeStatus === "won");
+    const lost = opps.filter((o) => o.closeStatus === "lost");
+    const decided = won.length + lost.length;
+
+    const byStage = SE_STAGES.map((stage) => {
+      const rows = open.filter((o) => o.seStage === stage);
+      return { key: stage, acv: sum(rows), count: rows.length };
+    });
+    const byProduct = PRODUCTS.map((product) => {
+      const rows = open.filter((o) => (o.products || []).includes(product));
+      return { key: product, acv: sum(rows), count: rows.length };
+    })
+      .filter((r) => r.count > 0)
+      .sort((a, b) => b.acv - a.acv);
+
+    return {
+      open,
+      won,
+      lost,
+      wonAcv: sum(won),
+      lostAcv: sum(lost),
+      // No decided deals means no win rate — showing 0% would read as losing
+      // every deal rather than as having closed none.
+      winRate: decided ? Math.round((won.length / decided) * 100) : null,
+      avgAcv: open.length ? sum(open) / open.length : 0,
+      byStage,
+      byProduct,
+      stageMax: Math.max(0, ...byStage.map((r) => r.acv)),
+      productMax: Math.max(0, ...byProduct.map((r) => r.acv)),
+      top: [...open].sort((a, b) => (Number(b.acv) || 0) - (Number(a.acv) || 0)).slice(0, 8),
+    };
+  }, [opps]);
+
+  if (opps.length === 0) {
+    return <Empty msg="No opportunities yet — add one and the financial picture fills in here." />;
+  }
+
+  return (
+    <div className="space-y-5">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <StatTile Icon={DollarSign} label="Open ACV" value={formatAcv(stats.totalAcv)} accent="#34d399" sub={`${f.open.length} open opportunit${f.open.length === 1 ? "y" : "ies"}`} />
+        <StatTile Icon={TrendingUp} label="Average deal" value={formatAcv(f.avgAcv)} accent="#38bdf8" sub="Across open pipeline" />
+        <StatTile Icon={Check} label="Closed won" value={formatAcv(f.wonAcv)} accent="#2dd4bf" sub={`${f.won.length} deal${f.won.length === 1 ? "" : "s"}`} />
+        <StatTile
+          Icon={Target}
+          label="Win rate"
+          value={f.winRate === null ? "—" : `${f.winRate}%`}
+          accent="#a78bfa"
+          sub={f.winRate === null ? "No closed deals yet" : `${f.won.length} won · ${f.lost.length} lost`}
+        />
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+        <section className="card p-5">
+          <div className="flex items-center gap-2">
+            <Layers size={15} className="text-slate-500" />
+            <h3 className="text-sm font-semibold text-slate-100">Open ACV by SE stage</h3>
+          </div>
+          <p className="mt-1 text-xs text-slate-500">Where the value sits in the technical cycle.</p>
+          <div className="mt-4 space-y-3.5">
+            {f.byStage.map((r) => (
+              <MeterRow key={r.key} label={r.key} value={r.acv} max={f.stageMax} count={r.count} color="#2dd4bf" />
+            ))}
+          </div>
+        </section>
+
+        <section className="card p-5">
+          <div className="flex items-center gap-2">
+            <Briefcase size={15} className="text-slate-500" />
+            <h3 className="text-sm font-semibold text-slate-100">Open ACV by product</h3>
+          </div>
+          <p className="mt-1 text-xs text-slate-500">
+            A deal counts against every product attached to it, so these overlap.
+          </p>
+          <div className="mt-4 space-y-3.5">
+            {f.byProduct.length === 0 ? (
+              <p className="text-xs text-slate-600">No products tagged on open opportunities yet.</p>
+            ) : (
+              f.byProduct.map((r) => (
+                <MeterRow key={r.key} label={r.key} value={r.acv} max={f.productMax} count={r.count} color="#38bdf8" />
+              ))
+            )}
+          </div>
+        </section>
+      </div>
+
+      <section className="card overflow-hidden">
+        <div className="border-b border-slate-800 px-5 py-4">
+          <h3 className="text-sm font-semibold text-slate-100">Largest open opportunities</h3>
+          <p className="mt-1 text-xs text-slate-500">Ranked by ACV.</p>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-slate-850 text-left text-[11px] uppercase tracking-wider text-slate-500">
+                <th className="px-5 py-2.5 font-medium">Account</th>
+                <th className="px-5 py-2.5 font-medium">SE stage</th>
+                <th className="px-5 py-2.5 font-medium">PoC health</th>
+                <th className="px-5 py-2.5 text-right font-medium">ACV</th>
+                <th className="px-5 py-2.5 font-medium">Close date</th>
+              </tr>
+            </thead>
+            <tbody>
+              {f.top.map((o) => (
+                <tr key={o.id} className="border-t border-slate-800">
+                  <td className="px-5 py-3">
+                    <div className="font-medium text-slate-100">{o.account}</div>
+                    <div className="text-xs text-slate-500">{o.segment || "—"}</div>
+                  </td>
+                  <td className="px-5 py-3 text-xs text-slate-300">{o.seStage}</td>
+                  <td className="px-5 py-3"><HealthDot health={derivePocHealth(o)} /></td>
+                  <td className="px-5 py-3 text-right font-medium tabular-nums text-slate-100">{formatAcv(o.acv)}</td>
+                  <td className="px-5 py-3 font-mono text-xs text-slate-400">{o.closeDate || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
     </div>
   );
 }
@@ -589,13 +1022,15 @@ function FinancialDashboard({ stats }) {
 function ListView({ opps, allOpps, total, filter, setFilter, onOpen, onSeed, onAdd, tasks, onToggleTask, onDeleteTask, showOwner }) {
   if (total === 0) {
     return (
-      <div className="mt-10 rounded-xl border border-dashed border-slate-800 bg-slate-900/50 p-10 text-center">
-        <Target size={28} className="mx-auto text-slate-600" />
-        <h2 className="mt-3 text-slate-200 font-medium">No opportunities yet</h2>
-        <p className="mt-1 text-sm text-slate-500 max-w-md mx-auto">
+      <div className="card border-dashed p-12 text-center">
+        <span className="mx-auto inline-flex rounded-xl bg-teal-500/10 p-4 text-teal-400">
+          <Target size={26} />
+        </span>
+        <h2 className="mt-4 text-base font-medium text-slate-100">No opportunities yet</h2>
+        <p className="mx-auto mt-2 max-w-md text-sm text-slate-500">
           Add the accounts you're supporting and start logging discovery notes, demos and PoC criteria. Everything you enter saves automatically.
         </p>
-        <div className="mt-5 flex items-center justify-center gap-2">
+        <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
           <button onClick={onAdd} className="inline-flex items-center gap-1.5 rounded-md px-3 py-2 text-xs font-medium text-slate-950" style={{ background: "#2dd4bf" }}>
             <Plus size={14} /> Add your first opportunity
           </button>
@@ -608,106 +1043,122 @@ function ListView({ opps, allOpps, total, filter, setFilter, onOpen, onSeed, onA
   }
 
   const closedCount = allOpps.filter(isClosed).length;
+  const openTasks = tasks.filter((t) => !t.done).length;
   const filters = [
     { key: "all", label: "All" },
     { key: "poc", label: "Live PoCs" },
     { key: "risk", label: "At risk" },
     { key: "closed", label: `Closed (${closedCount})` },
-    { key: "tasks", label: `Tasks (${tasks.length})` },
+    { key: "tasks", label: `Tasks (${openTasks})`, Icon: ListTodo },
   ];
 
   return (
-    <div className="mt-5">
-      <div className="flex items-center gap-1.5 mb-3">
-        {filters.map((f) => (
-          <button
-            key={f.key}
-            onClick={() => setFilter(f.key)}
-            className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs border ${
-              filter === f.key
-                ? "border-teal-500 bg-teal-500/10 text-teal-300"
-                : "border-slate-800 bg-slate-900 text-slate-400 hover:border-slate-700"
-            }`}
-          >
-            {f.key === "tasks" && <ListTodo size={12} />}
-            {f.label}
-          </button>
-        ))}
+    <div>
+      {/* Segmented control: one bordered group rather than five loose chips,
+          so the filter row reads as a single control at full width. */}
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <div className="inline-flex flex-wrap rounded-lg border border-slate-800 bg-slate-900 p-1">
+          {filters.map((f) => (
+            <button
+              key={f.key}
+              onClick={() => setFilter(f.key)}
+              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                filter === f.key
+                  ? "bg-teal-500/15 text-teal-300"
+                  : "text-slate-400 hover:bg-slate-850 hover:text-slate-200"
+              }`}
+            >
+              {f.Icon && <f.Icon size={13} />}
+              {f.label}
+            </button>
+          ))}
+        </div>
+        {filter !== "tasks" && (
+          <span className="ml-auto text-xs text-slate-500 tabular-nums">
+            {opps.length} {opps.length === 1 ? "opportunity" : "opportunities"}
+          </span>
+        )}
       </div>
 
       {filter === "tasks" ? (
         <TaskPanel tasks={tasks} opps={allOpps} onToggle={onToggleTask} onDelete={onDeleteTask} onOpenOpp={onOpen} />
+      ) : opps.length === 0 ? (
+        <Empty msg="Nothing matches this filter." />
       ) : (
-      <div className="overflow-x-auto rounded-lg border border-slate-800">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="bg-slate-900 text-left text-[11px] uppercase tracking-wider text-slate-500">
-              <th className="px-3 py-2 font-medium">Account</th>
-              <th className="px-3 py-2 font-medium">Acct Mgr</th>
-              <th className="px-3 py-2 font-medium">SE stage</th>
-              {filter === "closed" ? (
-                <th className="px-3 py-2 font-medium">Result</th>
-              ) : (
-                <th className="px-3 py-2 font-medium">PoC health</th>
-              )}
-              <th className="px-3 py-2 font-medium">Products</th>
-              <th className="px-3 py-2 font-medium">Next SE action</th>
-            </tr>
-          </thead>
-          <tbody>
-            {opps.map((o) => (
-              <tr
-                key={o.id}
-                onClick={() => onOpen(o.id)}
-                className="border-t border-slate-800 cursor-pointer hover:bg-slate-900/60"
-              >
-                <td className="px-3 py-3">
-                  <div className="font-medium text-slate-100">{o.account}</div>
-                  <div className="text-xs text-slate-500">
-                    {o.segment}
-                    {/* Only meaningful in the admin's whole-team view, where rows
-                        come from several SEs. */}
-                    {showOwner && o.ownerName && (
-                      <span className="text-slate-600">
-                        {o.segment ? " · " : ""}
-                        {o.ownerName}
-                      </span>
+        <div className="card overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[900px] text-sm">
+              <thead>
+                <tr className="bg-slate-850 text-left text-[11px] uppercase tracking-wider text-slate-500">
+                  <th className="px-5 py-2.5 font-medium">Account</th>
+                  <th className="px-5 py-2.5 font-medium">Acct Mgr</th>
+                  <th className="px-5 py-2.5 font-medium">SE stage</th>
+                  {filter === "closed" ? (
+                    <th className="px-5 py-2.5 font-medium">Result</th>
+                  ) : (
+                    <th className="px-5 py-2.5 font-medium">PoC health</th>
+                  )}
+                  <th className="px-5 py-2.5 text-right font-medium">ACV</th>
+                  <th className="px-5 py-2.5 font-medium">Products</th>
+                  <th className="px-5 py-2.5 font-medium">Next SE action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {opps.map((o) => (
+                  <tr
+                    key={o.id}
+                    onClick={() => onOpen(o.id)}
+                    className="group cursor-pointer border-t border-slate-800 transition-colors hover:bg-slate-850"
+                  >
+                    <td className="px-5 py-3">
+                      <div className="font-medium text-slate-100 group-hover:text-teal-300">{o.account}</div>
+                      <div className="text-xs text-slate-500">
+                        {o.segment}
+                        {/* Only meaningful in the admin's whole-team view, where rows
+                            come from several SEs. */}
+                        {showOwner && o.ownerName && (
+                          <span className="text-slate-600">
+                            {o.segment ? " · " : ""}
+                            {o.ownerName}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-5 py-3 text-xs text-slate-300">{o.acctMgr || "—"}</td>
+                    <td className="px-5 py-3 text-xs text-slate-300">{o.seStage}</td>
+                    {filter === "closed" ? (
+                      <td className="px-5 py-3">
+                        <span
+                          className="text-xs font-medium"
+                          style={{ color: o.closeStatus === "won" ? "#34d399" : "#fb7185" }}
+                        >
+                          {o.closeStatus === "won" ? "Won" : "Lost"}
+                        </span>
+                      </td>
+                    ) : (
+                      <td className="px-5 py-3">
+                        <HealthDot health={derivePocHealth(o)} />
+                      </td>
                     )}
-                  </div>
-                </td>
-                <td className="px-3 py-3">
-                  <span className="text-xs text-slate-300">{o.acctMgr || "—"}</span>
-                </td>
-                <td className="px-3 py-3">
-                  <span className="text-xs text-slate-300">{o.seStage}</span>
-                </td>
-                {filter === "closed" ? (
-                  <td className="px-3 py-3">
-                    <span
-                      className="text-xs font-medium"
-                      style={{ color: o.closeStatus === "won" ? "#34d399" : "#fb7185" }}
-                    >
-                      {o.closeStatus === "won" ? "Won" : "Lost"}
-                    </span>
-                  </td>
-                ) : (
-                  <td className="px-3 py-3">
-                    <HealthDot health={derivePocHealth(o)} />
-                  </td>
-                )}
-                <td className="px-3 py-3">
-                  <div className="flex flex-wrap gap-1">
-                    {(o.products || []).map((p) => (
-                      <Pill key={p}>{p}</Pill>
-                    ))}
-                  </div>
-                </td>
-                <td className="px-3 py-3 text-xs text-slate-400 max-w-xs">{o.nextAction || "—"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+                    <td className="px-5 py-3 text-right text-xs tabular-nums text-slate-300">
+                      {o.acv ? formatAcv(o.acv) : "—"}
+                    </td>
+                    <td className="px-5 py-3">
+                      <div className="flex flex-wrap gap-1">
+                        {(o.products || []).map((p) => (
+                          <Pill key={p}>{p}</Pill>
+                        ))}
+                      </div>
+                    </td>
+                    <td className="px-5 py-3 text-xs text-slate-400">
+                      <div className="max-w-xs truncate" title={o.nextAction || ""}>{o.nextAction || "—"}</div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -775,81 +1226,104 @@ function DetailView({ opp, tab, setTab, update, removeOpp, onBack, bizCases, set
   };
   const reopenOpp = () => update(opp.id, (o) => ({ ...o, closeStatus: "open", closedAt: undefined }));
 
+  const meta = [
+    { label: "ACV", value: opp.acv ? formatAcv(opp.acv) : "—" },
+    { label: "SE stage", value: opp.seStage || "—" },
+    { label: "Close date", value: opp.closeDate || "—" },
+    { label: "Acct mgr", value: opp.acctMgr || "—" },
+    { label: "Competitor", value: opp.competitor || "—" },
+  ];
+
   return (
-    <div className="mt-5">
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <button onClick={onBack} className="inline-flex items-center gap-1 text-sm text-slate-400 hover:text-slate-200">
-          <ChevronLeft size={16} /> All opportunities
-        </button>
-        <div className="flex items-center gap-3">
-          {isClosed(opp) ? (
-            <button onClick={reopenOpp} className="inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-slate-200">
-              <ArrowRight size={14} /> Reopen opportunity
+    <div>
+      <button onClick={onBack} className="inline-flex items-center gap-1 text-sm text-slate-400 hover:text-slate-200">
+        <ChevronLeft size={16} /> All opportunities
+      </button>
+
+      {/* Identity, state and the destructive actions live in one header block,
+          so the tabs below are purely about content. */}
+      <div className="card mt-3 overflow-hidden">
+        <div className="flex flex-wrap items-start justify-between gap-4 p-5">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-3">
+              <h2 className="text-xl font-semibold text-slate-100">{opp.account}</h2>
+              {isClosed(opp) ? (
+                <span
+                  className="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium"
+                  style={{
+                    color: opp.closeStatus === "won" ? "#34d399" : "#fb7185",
+                    borderColor: opp.closeStatus === "won" ? "rgba(52,211,153,0.4)" : "rgba(251,113,133,0.4)",
+                    background: opp.closeStatus === "won" ? "rgba(52,211,153,0.1)" : "rgba(251,113,133,0.1)",
+                  }}
+                >
+                  Closed · {opp.closeStatus === "won" ? "Won" : "Lost"}
+                </span>
+              ) : (
+                <HealthDot health={derivePocHealth(opp)} />
+              )}
+              {opp.segment && <span className="text-xs text-slate-500">{opp.segment}</span>}
+            </div>
+            <dl className="mt-4 flex flex-wrap gap-x-8 gap-y-3">
+              {meta.map((m) => (
+                <div key={m.label}>
+                  <dt className="text-[10px] font-medium uppercase tracking-wider text-slate-500">{m.label}</dt>
+                  <dd className="mt-0.5 text-sm text-slate-200 tabular-nums">{m.value}</dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {isClosed(opp) ? (
+              <button onClick={reopenOpp} className="inline-flex items-center gap-1.5 rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-300 hover:border-slate-600">
+                <ArrowRight size={14} /> Reopen
+              </button>
+            ) : (
+              <>
+                <button
+                  onClick={() => closeOpp("won")}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-500/20"
+                >
+                  <Check size={14} /> Close Win
+                </button>
+                <button
+                  onClick={() => closeOpp("lost")}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-1.5 text-xs font-medium text-rose-300 hover:bg-rose-500/20"
+                >
+                  <X size={14} /> Close Loss
+                </button>
+              </>
+            )}
+            <button
+              onClick={() => {
+                if (confirm(`Delete ${opp.account} and all its notes, demos and PoC data?`)) removeOpp(opp.id);
+              }}
+              title="Delete opportunity"
+              className="rounded-md border border-slate-800 p-2 text-slate-500 hover:border-rose-500/40 hover:text-rose-400"
+            >
+              <Trash2 size={14} />
             </button>
-          ) : (
-            <>
-              <button
-                onClick={() => closeOpp("won")}
-                className="inline-flex items-center gap-1.5 rounded-md border border-emerald-700 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-500/20"
-              >
-                <Check size={14} /> Close Win
-              </button>
-              <button
-                onClick={() => closeOpp("lost")}
-                className="inline-flex items-center gap-1.5 rounded-md border border-rose-700 bg-rose-500/10 px-3 py-1.5 text-xs font-medium text-rose-300 hover:bg-rose-500/20"
-              >
-                <X size={14} /> Close Loss
-              </button>
-            </>
-          )}
-          <button
-            onClick={() => {
-              if (confirm(`Delete ${opp.account} and all its notes, demos and PoC data?`)) removeOpp(opp.id);
-            }}
-            className="inline-flex items-center gap-1.5 text-xs text-rose-400 hover:text-rose-300"
-          >
-            <Trash2 size={14} /> Delete opportunity
-          </button>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-1 overflow-x-auto border-t border-slate-800 px-3">
+          {tabs.map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              className={`inline-flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2.5 text-sm transition-colors ${
+                tab === t.key
+                  ? "border-teal-500 text-teal-300"
+                  : "border-transparent text-slate-400 hover:text-slate-200"
+              }`}
+            >
+              <t.Icon size={14} /> {t.label}
+            </button>
+          ))}
         </div>
       </div>
 
-      <div className="mt-3 flex items-center gap-3 flex-wrap">
-        <h2 className="text-xl font-semibold text-slate-100">{opp.account}</h2>
-        {isClosed(opp) ? (
-          <span
-            className="inline-flex items-center gap-1.5 text-xs font-medium"
-            style={{ color: opp.closeStatus === "won" ? "#34d399" : "#fb7185" }}
-          >
-            <span
-              className="inline-block w-2 h-2 rounded-full"
-              style={{ background: opp.closeStatus === "won" ? "#34d399" : "#fb7185" }}
-            />
-            Closed · {opp.closeStatus === "won" ? "Won" : "Lost"}
-          </span>
-        ) : (
-          <HealthDot health={derivePocHealth(opp)} />
-        )}
-        <span className="text-xs text-slate-500">{opp.segment}</span>
-      </div>
-
-      {/* tabs */}
-      <div className="mt-4 flex items-center gap-1 border-b border-slate-800">
-        {tabs.map((t) => (
-          <button
-            key={t.key}
-            onClick={() => setTab(t.key)}
-            className={`inline-flex items-center gap-1.5 px-3 py-2 text-sm border-b-2 -mb-px ${
-              tab === t.key
-                ? "border-teal-500 text-teal-300"
-                : "border-transparent text-slate-400 hover:text-slate-200"
-            }`}
-          >
-            <t.Icon size={14} /> {t.label}
-          </button>
-        ))}
-      </div>
-
-      <div className="mt-5">
+      <div className="mt-5 fade-up" key={tab}>
         {tab === "overview" && <OverviewTab opp={opp} update={update} addTask={addTask} />}
         {tab === "notes" && <NotesTab opp={opp} update={update} />}
         {tab === "demos" && <DemosTab opp={opp} update={update} />}
@@ -870,8 +1344,8 @@ function OverviewTab({ opp, update, addTask }) {
     });
 
   return (
-    <div className="grid md:grid-cols-2 gap-5">
-      <div className="space-y-4">
+    <div className="grid max-w-6xl gap-4 lg:grid-cols-2">
+      <div className="card space-y-4 p-5">
         <Field label="SE stage">
           <select className={inputCls} value={opp.seStage} onChange={(e) => set("seStage", e.target.value)}>
             {SE_STAGES.map((s) => (
@@ -913,8 +1387,8 @@ function OverviewTab({ opp, update, addTask }) {
             </button>
           </div>
           <textarea
-            className={inputCls}
-            rows={2}
+            className={`${inputCls} resize-y`}
+            rows={5}
             value={opp.nextAction || ""}
             onChange={(e) => set("nextAction", e.target.value)}
             placeholder="The one thing only the SE can move forward…"
@@ -922,7 +1396,7 @@ function OverviewTab({ opp, update, addTask }) {
         </div>
       </div>
 
-      <div className="space-y-4">
+      <div className="card space-y-4 p-5">
         <div className="grid grid-cols-2 gap-3">
           <Field label="ACV ($)">
             <input
@@ -1761,7 +2235,7 @@ function AdminPanel({ currentUser, onError, onAuthLost }) {
       .catch(fail);
 
   return (
-    <div className="mt-6 space-y-5">
+    <div className="max-w-5xl space-y-5">
       <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
         <h3 className="text-sm font-medium text-slate-200 mb-3 inline-flex items-center gap-1.5">
           <UserPlus size={15} style={{ color: "#2dd4bf" }} /> Invite a teammate

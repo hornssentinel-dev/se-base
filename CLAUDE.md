@@ -108,9 +108,59 @@ PATCH /api/admin/users/:id      # role / status
 GET|POST /api/admin/invites
 DELETE /api/admin/invites/:token
 
+POST /api/chat                  # Ollama-backed Q&A over your own records (streams NDJSON)
+
+GET  /api/ingest                # read-only retrieval feed, below here — NO AUTH by default
+GET  /api/ingest/documents      # embed-ready docs; ?since= ?types= ?scope=all ?chunkChars= ?format=ndjson
+GET  /api/ingest/documents/:id
+GET  /api/ingest/manifest       # id+hash+updatedAt for every doc (delta sync / deletion detection)
+GET  /api/ingest/stats
+
 GET  /api/health                # no auth
 GET  *                          # SPA fallback (serves index.html)
 ```
+
+The `/api/ingest/*` routes are **open — no auth** — because they feed a retrieval
+job on another host on the LAN. An unauthenticated request has no owner to scope
+to, so it returns the whole org; a request carrying a session cookie keeps the
+ordinary ownership rules. Set `INGEST_REQUIRE_AUTH=true` to put the read-only API
+key / session check back (`requireReadAccess` in auth.js, keys from
+`npm run api-key`); nothing else changes. Reachability is a network-layer
+concern now, not an app one.
+
+The feed exists because an embedding pipeline needs the opposite shape from the
+UI: one small document per note/demo/PoC rather than one deep nested
+opportunity. See docs/ollama-ingest.md.
+
+`POST /api/chat` powers the in-app **Ask** panel. It is session-authenticated and
+scoped like every other data route, and it builds the prompt server-side from
+`buildDocuments()` — the client never supplies context, so it cannot widen its own
+scope. The reply streams through from Ollama as NDJSON. Config: `OLLAMA_URL`
+(default `http://localhost:11434`), `OLLAMA_MODEL` (default `gemma4:e4b`),
+`CHAT_CONTEXT_CHARS` (default 24000).
+
+The prompt has two halves, and the split is the whole design:
+
+1. **`opportunityTable()` — every opportunity, every scalar column, never ranked.**
+   Rendered as `Field: value` lines including derived `PoC health` and `At risk`.
+   This is what makes filter-shaped questions answerable. Relevance ranking
+   structurally cannot answer "which PoCs are at risk": it returns what is
+   topically similar, not the complete set where a column equals a value — and
+   the word "risk" appears nowhere in a PoC record, which is stored as
+   pass/fail/blocked and derived into red/amber. Before this, that question
+   retrieved 2 documents out of 72 and **zero** PoCs.
+2. **`selectContext()` — free-text notes only**, keyword-ranked into
+   `CHAT_CONTEXT_CHARS` (6000 default). Word-boundary matching with crude
+   singularisation, and a 1200-char cap per document so two long notes can't eat
+   the whole budget.
+
+Do not "fix" a wrong answer here by editing the system prompt — if the model got
+it wrong, check what actually reached it first. Two other load-bearing details:
+`num_ctx` is set explicitly because Ollama defaults every model to 4096 and
+silently truncates past it (gemma4:e4b is trained for 131072), and the route
+**short-circuits without calling the model when no records are in scope**, because
+a local model handed an empty context block invents accounts, dollar figures and
+people. That was observed, not theorised.
 
 Ownership is enforced server-side on every data route — a client cannot widen its
 own scope. `scopeUser()` in server.js is the single place that decides whose rows
@@ -183,9 +233,10 @@ Unlike notes/demos/PoC, business cases are **not** nested inside an opportunity 
 - `POC_STATUS`: { pending, pass, fail, blocked } — each with label, color, and Icon
 
 ### Database Tables
-`users`, `sessions`, `invites`, `opportunities`, `business_cases`, `tasks` — see db.js
-for the schema. `opportunities` and `tasks` carry a `user_id`; `business_cases` does
-not, because it is shared.
+`users`, `sessions`, `api_keys`, `invites`, `opportunities`, `business_cases`, `tasks` —
+see db.js for the schema. `opportunities` and `tasks` carry a `user_id`;
+`business_cases` does not, because it is shared. `api_keys` stores only the sha256
+of each token, so a database dump yields no usable credential.
 
 An opportunity's `products`, `notes`, `demos`, and `poc` are JSON columns rather than
 child tables. The UI always loads and saves them together with their parent opp, so
@@ -203,6 +254,7 @@ version.
 2. Add it to the `INSERT ... ON CONFLICT` column list in server.js
 3. Update the `sampleOpp()` function (around line 60)
 4. Add to the opp object structure in form handlers / detail views
+5. If it should be visible to the LLM index, render it in `opportunityDoc()` in ingest.js
 
 **Changing the data model or storage schema:**
 - `CREATE TABLE IF NOT EXISTS` runs on every boot, so new *tables* appear automatically;
@@ -214,6 +266,27 @@ version.
 - Tailwind classes are available in public/index.html via CDN
 - Colors and typography should use Tailwind utilities (e.g., `text-red-500`, `bg-slate-100`)
 - Icons from Lucide React are already imported at the top
+- The **slate scale is redefined** in the `tailwind.config` block of
+  public/index.html — blue-tinted greys borrowed from the sentinel dashboard
+  (`platforms/multi-tenant/dashboard`), whose palette is colourblind-safe. The
+  component file addresses surfaces as `bg-slate-900` / `border-slate-800` in
+  hundreds of places, so re-skinning happens by editing those token values, not
+  by rewriting classes. `slate-950` is the page, `slate-900` a card,
+  `slate-850` a raised row, `slate-800` a border, `slate-700` an input border.
+- Teal (`#2dd4bf`) is the single brand accent — active nav, focus, primary
+  buttons. Health colours (green/amber/rose) mean status and nothing else.
+- `.card`, `.nav-link`, `.nav-section` and `.fade-up` are defined once in
+  public/index.html; prefer `card` over re-typing border/background classes.
+
+**Layout:**
+- The shell is a fixed 240px sidebar (`w-60`) plus a sticky 64px header, with
+  content in `main` capped at `max-w-[1600px]`. The sidebar is permanent from
+  `lg` up and a drawer below it, toggled by `navOpen` in `SETracker`.
+- The header title/subtitle are derived from `selected` + `mainView` in one
+  `page` object — add a view there when adding a nav destination.
+- The stat row on Pipeline doubles as the filter control: `StatTile` renders a
+  `button` when given `onClick`, so the number you react to is the thing you
+  click.
 
 **Adding UI elements:**
 - Icon imports are at the top; add new icons from lucide-react if needed
@@ -222,11 +295,15 @@ version.
 ## File Purposes
 
 - **server.js** – Express server; auth routes, per-record data API, admin routes, image upload, static files, serves se-tracker.jsx itself (it lives at the project root, outside public/), and SPA routing
+- **health.js** – `derivePocHealth()` / `isPocAtRisk()`; the single source of truth for PoC health, shared by the React UI and the server. Plain JS, no JSX and no Node built-ins, because both import it
 - **db.js** – SQLite connection, schema, and row↔object mapping
-- **auth.js** – scrypt password hashing, session issue/lookup, invite tokens, and the requireAuth/requireAdmin middleware
+- **auth.js** – scrypt password hashing, session issue/lookup, invite tokens, read-only API keys for machine clients, and the requireAuth/requireAdmin/requireReadAccess middleware (`requireReadAccess` is only mounted when INGEST_REQUIRE_AUTH=true)
+- **ingest.js** – Read-only `/api/ingest` retrieval feed, plus `buildDocuments()`/`selectContext()` reused by the chat route: fans opportunities, notes, demos, PoCs, business cases and tasks out into small plain-text documents for embedding, with `?since=` delta sync, a hash manifest for deletion detection, and optional chunking
 - **se-tracker.jsx** – Entire React UI; state management, rendering, event handling. This is the actual source served to the browser — it is not a template or pre-build artifact.
-- **public/index.html** – HTML shell; import map + Babel standalone + Tailwind from CDN, and the `<script>` tag that loads and transforms se-tracker.jsx. Has no app logic of its own.
+- **public/index.html** – HTML shell; import map + Babel standalone + Tailwind from CDN, the `tailwind.config` design tokens and the shared `.card` / `.nav-link` CSS, and the `<script>` tag that loads and transforms se-tracker.jsx. No app logic, but it is where the palette lives.
 - **se-tracker.service** – Systemd service definition for production deployment
+- **docs/ollama-ingest.md** – How to point a local Ollama (or any RAG pipeline) at the ingest feed, including a complete incremental sync loop
+- **scripts/create-api-key.js** – Issues, lists and revokes the read-only API keys machine clients use against /api/ingest (`npm run api-key`)
 - **scripts/create-user.js** – Creates an account from the CLI (`--role admin|se`); bootstraps the first admin and is the one path that bypasses invites
 - **scripts/reassign.js** – Moves opportunities and tasks from one owner to another
 - **scripts/migrate-storage.js** – One-time import of a pre-multi-user data/storage.json

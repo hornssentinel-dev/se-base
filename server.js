@@ -5,6 +5,8 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { db, IMAGE_DIR, rowToOpp, oppToRow, rowToBizCase, rowToTask } from './db.js';
+import { router as ingestRouter, buildDocuments, selectContext, opportunityTable } from './ingest.js';
+import { Readable } from 'stream';
 import {
   SESSION_COOKIE, sessionCookieOptions, attachUser, requireAuth, requireAdmin,
   hashPassword, verifyPassword, createSession, destroySession, createInvite,
@@ -30,6 +32,13 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/se-tracker.jsx', (req, res) => {
   res.type('text/babel').sendFile(path.join(__dirname, 'se-tracker.jsx'));
+});
+
+// Shared with the server (see health.js). The browser imports it as a plain ES
+// module from inside the Babel-transformed se-tracker.jsx, so it has to be
+// reachable at an absolute path — it lives at the project root, outside public/.
+app.get('/health.js', (req, res) => {
+  res.type('application/javascript').sendFile(path.join(__dirname, 'health.js'));
 });
 
 // ---- auth --------------------------------------------------------------------
@@ -318,6 +327,136 @@ app.post('/api/admin/invites', requireAdmin, (req, res) => {
 app.delete('/api/admin/invites/:token', requireAdmin, (req, res) => {
   db.prepare('DELETE FROM invites WHERE token = ?').run(req.params.token);
   res.json({ ok: true });
+});
+
+// ---- retrieval feed for external LLM tooling ---------------------------------
+
+// Read-only, API-key authenticated, and defined in ingest.js because it is a
+// different shape of the same data rather than another CRUD surface.
+app.use('/api/ingest', ingestRouter);
+
+// ---- chat (Ollama-backed Q&A over the tracker) -------------------------------
+
+// The browser can't call Ollama directly — it listens on loopback and would be a
+// cross-origin call besides — so the server proxies. It also means the prompt is
+// assembled server-side from rows the user is actually allowed to see, rather
+// than trusting a context blob the client sent up.
+const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'gemma4:e4b';
+// Ollama defaults num_ctx to 4096 for every model regardless of what it was
+// trained for — gemma4:e4b actually supports 131072 (`ollama show`). Left at the
+// default, a prompt over ~4096 tokens is silently truncated with no error, which
+// is a trap: the model answers confidently from a half-read prompt. So set it
+// explicitly. Not to the maximum, though — the KV cache is allocated from RAM,
+// and this box has no GPU.
+const NUM_CTX = Number(process.env.OLLAMA_NUM_CTX) || 8192;
+// Budget for free-text notes only. The opportunity table is never sampled and
+// is not counted here — it always goes in whole.
+const NOTE_BUDGET = Number(process.env.CHAT_CONTEXT_CHARS) || 6000;
+// Notes, demos, business cases and tasks are prose and go through retrieval.
+// Opportunities and PoCs do not: they are the table.
+const RETRIEVED_TYPES = ['note', 'demo', 'business_case', 'task'];
+
+// Built per request, not once at boot, so "today" doesn't freeze on the date the
+// process happened to start.
+const systemPrompt = () => `You are an assistant embedded in SE Tracker, a technical
+pursuit log used by sales engineers. Answer questions about the pipeline using
+ONLY the tracker records provided below.
+
+Rules:
+- If the records don't contain the answer, say so plainly. Never invent an
+  account, number, date, person or quote. An account you cannot see in the
+  records below does not exist as far as you are concerned.
+- Cite the account name when you refer to a specific deal.
+- Be concise and concrete. Prefer specifics from the notes over generalities.
+- Dates are ISO (YYYY-MM-DD). Today is ${new Date().toISOString().slice(0, 10)}.`;
+
+app.post('/api/chat', requireAuth, async (req, res) => {
+  const { messages = [], all = false } = req.body || {};
+  const question = [...messages].reverse().find((m) => m.role === 'user')?.content || '';
+  if (!question.trim()) return res.status(400).json({ error: 'A question is required' });
+
+  // Same scoping rule as everywhere else: your own rows unless you're an admin
+  // who asked for the whole org.
+  const userId = all && req.user.role === 'admin' ? null : req.user.id;
+
+  // The complete opportunity table, unranked and unsampled. This is what makes
+  // filter-shaped questions ("which PoCs are at risk", "what closes in March",
+  // "which deals is Zscaler in") answerable at all: relevance ranking returns
+  // what is topically similar, never the complete set where a field equals a
+  // value, and "risk" does not appear anywhere in a PoC record.
+  const table = opportunityTable(userId);
+  const notes = selectContext(
+    buildDocuments({ userId, types: RETRIEVED_TYPES }),
+    question,
+    NOTE_BUDGET
+  );
+
+  // With nothing in scope there is nothing to ground an answer in, and a local
+  // model handed an empty context block will cheerfully invent an account, a
+  // dollar figure and a person's name — observed with gemma4 doing exactly that.
+  // Short-circuit rather than trusting the system prompt to hold the line.
+  if (!table.count && !notes.documents.length) {
+    res.set({ 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' });
+    res.write(JSON.stringify({ meta: { documents: 0, truncated: false, model: OLLAMA_MODEL } }) + '\n');
+    res.write(JSON.stringify({
+      message: {
+        content: "You don't have any opportunities, notes or tasks in the tracker yet, so there's nothing for me to answer from.",
+      },
+      done: true,
+    }) + '\n');
+    return res.end();
+  }
+
+  const context = [
+    '=== OPPORTUNITY TABLE (complete, every opportunity in scope) ===',
+    table.text,
+    '',
+    '=== RELATED NOTES AND RECORDS (a relevant selection, not exhaustive) ===',
+    notes.documents.map((d) => `[${d.type}] ${d.text}`).join('\n\n---\n\n') || '(none matched)',
+  ].join('\n');
+
+  const payload = {
+    model: OLLAMA_MODEL,
+    stream: true,
+    keep_alive: process.env.OLLAMA_KEEP_ALIVE || '30m',
+    options: { num_ctx: NUM_CTX },
+    messages: [
+      { role: 'system', content: `${systemPrompt()}\n\n${context}` },
+      ...messages.slice(-8).map((m) => ({ role: m.role, content: m.content })),
+    ],
+  };
+
+  let upstream;
+  try {
+    upstream = await fetch(`${OLLAMA_URL}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch (err) {
+    return res.status(502).json({ error: `Can't reach Ollama at ${OLLAMA_URL} — is it running?` });
+  }
+
+  if (!upstream.ok) {
+    const detail = await upstream.text().catch(() => '');
+    return res.status(502).json({
+      error: `Ollama returned ${upstream.status}. ${detail.slice(0, 200)}`,
+    });
+  }
+
+  // Ollama streams NDJSON; pass it straight through so tokens appear as they
+  // are generated rather than after a 30-second wait on a local model.
+  res.set({ 'Content-Type': 'application/x-ndjson', 'Cache-Control': 'no-store' });
+  res.write(JSON.stringify({
+    meta: {
+      opportunities: table.count,
+      documents: notes.documents.length,
+      truncated: notes.truncated,
+      model: OLLAMA_MODEL,
+    },
+  }) + '\n');
+  Readable.fromWeb(upstream.body).pipe(res);
 });
 
 app.get('/api/health', (req, res) => {

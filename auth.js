@@ -113,3 +113,71 @@ export const publicUser = (u) => ({
   createdAt: u.created_at,
   lastLoginAt: u.last_login_at,
 });
+
+// ---- API keys ----------------------------------------------------------------
+// Long-lived bearer tokens for machine clients (the Ollama ingest job). Kept
+// separate from sessions: they don't expire on the 30-day session clock, they
+// carry a read-only scope, and revoking one doesn't sign a human out anywhere.
+
+const API_KEY_PREFIX = 'set_'; // "SE Tracker" — makes a leaked token greppable.
+
+const sha256 = (s) => crypto.createHash('sha256').update(s).digest('hex');
+
+export function createApiKey({ userId, name, expiresInDays = null }) {
+  const token = API_KEY_PREFIX + newId(24);
+  const id = newId(8);
+  db.prepare(
+    `INSERT INTO api_keys (id, user_id, name, token_hash, scope, created_at, expires_at)
+     VALUES (?, ?, ?, ?, 'read', ?, ?)`
+  ).run(id, userId, name || '', sha256(token), nowIso(), expiresInDays ? isoIn(expiresInDays) : null);
+  // The plaintext token is returned exactly once — only its hash is stored.
+  return { id, token };
+}
+
+export function userForApiKey(token) {
+  if (!token || !token.startsWith(API_KEY_PREFIX)) return null;
+  const row = db
+    .prepare(
+      `SELECT u.*, k.id AS api_key_id, k.scope AS api_key_scope FROM api_keys k
+         JOIN users u ON u.id = k.user_id
+        WHERE k.token_hash = ?
+          AND k.revoked_at IS NULL
+          AND (k.expires_at IS NULL OR k.expires_at > ?)
+          AND u.status = 'active'`
+    )
+    .get(sha256(token), nowIso());
+  if (!row) return null;
+  db.prepare('UPDATE api_keys SET last_used_at = ? WHERE id = ?').run(nowIso(), row.api_key_id);
+  return row;
+}
+
+export const listApiKeys = (userId = null) =>
+  db
+    .prepare(
+      `SELECT k.*, u.email AS user_email FROM api_keys k
+         JOIN users u ON u.id = k.user_id
+        ${userId ? 'WHERE k.user_id = ?' : ''}
+        ORDER BY k.created_at DESC`
+    )
+    .all(...(userId ? [userId] : []));
+
+export const revokeApiKey = (id) =>
+  db.prepare('UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL')
+    .run(nowIso(), id).changes;
+
+// Read-only routes accept either an ordinary browser session (so an admin can
+// eyeball the feed in a tab) or a bearer API key (so a job can poll it).
+export function requireReadAccess(req, res, next) {
+  if (req.user) return next();
+
+  const header = req.get('authorization') || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : req.get('x-api-key');
+  const user = userForApiKey(token);
+  if (!user) {
+    res.set('WWW-Authenticate', 'Bearer realm="se-tracker"');
+    return res.status(401).json({ error: 'A session cookie or API key is required' });
+  }
+  req.user = user;
+  req.apiKeyId = user.api_key_id;
+  next();
+}
